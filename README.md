@@ -2,6 +2,8 @@
 # for Predictive Tools in Microbiome Studies
 A focus on amplicon sequence variants and metagenomic shotgun sequencing
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.13169841.svg)](https://doi.org/10.5281/zenodo.13169841)
+
 ## Authors and Contributors
 [AIT Austrian Institute of Technology, Center for Health & Bioresources](https://www.ait.ac.at/en/research-topics/bioresources)
 
@@ -83,5 +85,5 @@ This work was supported by the [Austrian Science Fund (FWF)](https://www.fwf.ac.
 
 ## Citations
 - Escobar Rodríguez, C., Antonielli, L., Mitter, B., & Sessitsch, A. (2024). Assembly of Endophytic Communities of *Setaria viridis* Plants when Grown in Different Soils and Derived from Different Seeds. Phytobiomes Journal 2024 8:1, 34-45. https://doi.org/10.1094/PBIOMES-08-22-0054-MF
-
 - Carlino, N., et al. (2024). Unexplored microbial diversity from 2,500 food metagenomes and links with the human microbiome. *In press*.
+- Antonielli, L., Carlino, N., Segata, N., Sessitsch, A., Escobar Rodríguez, C., & Kostić, T. (2024). Harnessing Machine Learning for Predictive Tools in Microbiome Studies: A Focus on Amplicon Sequence Variants and Metagenomic Shotgun Sequencing. Zenodo, August 2, 2024. https://doi.org/10.5281/zenodo.13169841.
