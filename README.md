@@ -57,9 +57,9 @@ This case study investigates microbial community assembly in Setaria viridis, a 
 ## Second case study
 This case study focuses on predicting food categories, types, and subtypes from taxonomic profiles available from the [cFMD](https://github.com/SegataLab/cFMD) (curated Food Metagenomic Data) database. The [cFMD](https://github.com/SegataLab/cFMD) was developed as part of the [MASTER](https://www.master-h2020.eu/) EU Horizon 2020 project, which concluded in 2023. The purpose of the [cFMD](https://github.com/SegataLab/cFMD) repository is to provide a centralized source of high-quality, curated microbiome data and metadata related to food. It includes approximately 2,500 food metagenomic samples, with over 500 samples sourced from publicly available data in NCBI and the remainder generated within the MASTER project. The data were utilized to generate metagenome-assembled genomes (MAGs) and to perform taxonomic profiling at both species and strain levels using [MetaPhlAn 4](https://github.com/biobakery/MetaPhlAn) and [StrainPhlAn 4](https://github.com/biobakery/biobakery/wiki/strainphlan4). As an example, *Figure 2* displays the performance of various machine learning methods, including LDA, Random Forest, and XGBoost, in predicting food categories from the [cFMD](https://github.com/SegataLab/cFMD) database. The left panel shows the balanced accuracy of each method using 10-fold outer resampling. The right panel provides the performance of the base learners across several metrics and a detailed breakdown for XGBoost across different food categories.
 
-![Benchmark of base learners based on an 80% split chosen for training](data/cFMD_base_learners_benchmark.png)
+![Benchmark of base learners based on a random 80% split chosen for training](data/cFMD_base_learners_benchmark.png)
 
-<p align="center"><i>Figure 2: Benchmark of base learners based on an 80% split chosen for training.</i></p>
+<p align="center"><i>Figure 2: Benchmark of base learners based on a random 80% split chosen for training.</i></p>
 
 ## Running the code
 The Rmd files for the first and second case studies are designed to be run within RStudio. These files include code chunks and instructions to facilitate the installation of all necessary packages and execution of all steps.
