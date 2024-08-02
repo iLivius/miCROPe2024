@@ -1,0 +1,1624 @@
+---
+title: "Harnessing machine learning for predictive tools in microbiome studies: a focus on amplicon sequence variants and metagenomic shotgun sequencing"
+subtitle: "First case study: microbial community assembly in different plant compartments of Setaria viridis under the influence of the seeds of origin and cultivation soil"
+author:
+- "Livio Antonielli"
+- "Carolina Escobar Rodríguez"
+- "Angela Sessitsch"
+date: "July 26, 2024"
+eeditor_options: 
+  chunk_output_type: console
+format: html
+editor: visual
+always_allow_html: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+#### Setup PATH
+
+```{r path, echo=TRUE, message=FALSE, warning=FALSE}
+# Set working directory
+setwd("~/miCROPe2024")
+
+# Define paths to data files
+asv_table_path <- file.path(getwd(), "data/asv_table.tsv")
+metadata_path <- file.path(getwd(), "data/metadata.tsv")
+```
+
+#### Install and source libraries
+
+```{r pkgs, echo=TRUE, message=FALSE, warning=FALSE}
+# Check if BiocManager is installed, if not install it
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# Check if decontam is installed, if not install it from Bioconductor
+if (!requireNamespace("decontam", quietly = TRUE))
+    BiocManager::install("decontam")
+
+# List of packages to be installed from GitHub
+github_packages <- c("xl0418/ggradar2")
+
+# Function to check if a package is installed
+is_installed <- function(pkg) is.element(pkg, installed.packages()[, "Package"])
+
+# Install 'devtools' package if not installed
+if (!is_installed("devtools")) {
+  install.packages("devtools")
+}
+
+# Load 'devtools' package
+library(devtools)
+
+# Install packages from GitHub
+for (pkg in github_packages) {
+  if (!is_installed(pkg)) {
+    devtools::install_github(pkg)
+  }
+}
+
+# Check if pacman is installed, if not install it from CRAN, then source the following packages or install them first, if missing
+if (!require("pacman"))
+  install.packages("pacman")
+pacman::p_load(
+  abess,
+  C50,
+  callr,
+  coin,
+  conflicted,
+  cowplot,
+  decontam,
+  emmeans,
+  farff,
+  future,
+  future.apply,
+  ggraph,
+  ggradar2,
+  ggsignif,
+  kknn,
+  igraph,
+  LiblineaR,
+  lightgbm,
+  magrittr,
+  mikropml,
+  mlr3extralearners,
+  mlr3hyperband,
+  mlr3proba,
+  mlr3verse,
+  mlr3tuning,
+  mlr3tuningspaces,
+  mlr3viz,
+  multcomp,
+  multcompView,
+  parallel,
+  parallelMap,
+  paradox,
+  partykit,
+  psych,
+  randomForestSRC,
+  ranger,
+  rfPermute,
+  rtk,
+  RWeka,
+  tidygraph,
+  tidyverse,
+  vegan,
+  install = TRUE
+)
+
+# Solve known conflicts
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("rename", "dplyr")
+conflict_prefer("mutate", "dplyr")
+conflict_prefer("intersect", "base")
+conflict_prefer("survival", "cluster")
+```
+
+#### Parameters
+
+```{r selecting dataset, echo = FALSE, message = FALSE, warning = FALSE}
+# Reduce verbosity
+lgr::get_logger("mlr3")$set_threshold("warn")
+lgr::get_logger("bbotk")$set_threshold("warn")
+
+# Set seed for reproducibility
+seed = 20240718
+set.seed(seed)
+
+# Set number of CPUs
+num_threads = detectCores()
+
+# Time for an algorithm to run before a terminator will kill the tuning instance, in minutes.
+term_min = 15
+```
+
+#### Import data, decontaminate, subset
+
+```{r data wrangling, echo=TRUE, message=FALSE, warning=FALSE}
+# Import data
+biom_raw <-
+  read.table(
+    asv_table_path,
+    skip = 0,
+    comment.char = "",
+    check.names = FALSE,
+    header = TRUE,
+    row.names = 1,
+    sep = "\t"
+  )
+
+# Import metadata
+meta_raw <-
+  read.table(
+    metadata_path,
+    skip = 0,
+    comment.char = "",
+    check.names = FALSE,
+    header = TRUE,
+    row.names = 1,
+    sep = "\t"
+  )
+
+# Convert all metadata variables to factors
+meta_raw[] <- lapply(meta_raw[], as.factor)
+
+# Build a simplified data frame
+table_contam <- t(subset(biom_raw, select = -taxonomy))
+
+# Create a map file for decontam
+map_decon <-
+  as.data.frame(table_contam) %>%
+  rownames_to_column(var = "sample") %>%
+  mutate(condition = case_when(str_detect(sample, pattern = "^Control.*") ~ T, TRUE ~ F)) %>%
+  select(where(~ !is.numeric(.)))
+
+# Detect contaminant ASVs
+contam_prev05 <-
+  isContaminant(
+    table_contam,
+    method = "prevalence",
+    neg = map_decon$condition,
+    threshold = 0.5,
+    normalize = TRUE
+  )
+
+# Display contaminant ASVs
+cat("The following contaminat ASVs will be removed", "\n")
+table(contam_prev05$contaminant)
+biom_raw[contam_prev05$contaminant, "taxonomy"]
+
+# Remove contaminants ASVs, ctrl samples and empty rows
+biom_decontam <-
+  biom_raw[!contam_prev05$contaminant, !grepl("control", ignore.case = TRUE, colnames(biom_raw))] #removing ctrl samples
+biom_decontam <- biom_decontam[, c(rownames(meta_raw), "taxonomy")]
+biom_decontam <-
+  biom_decontam[rowSums(biom_decontam[, 1:ncol(biom_decontam) - 1] > 0) != 0, ]
+
+# Filter out V1 samples: i.e. keep b5 and l9 samples only
+meta <-
+  droplevels.data.frame(subset(meta_raw, meta_raw$Seed_origin != "V1"))
+meta$Organ <-
+  factor(
+    meta$Organ,
+    levels = c(
+      "Panicle",
+      "Upper_stem",
+      "Lower_stem",
+      "Root",
+      "Rhizosphere",
+      "Bulk_soil",
+      "Seeds"
+    )
+  )
+
+# Get a clean biom table
+biom <- biom_decontam[, c(rownames(meta), "taxonomy")]
+biom <- biom[rowSums(biom[, 1:ncol(biom) - 1] > 0) != 0,]
+
+# Convert biom-like table to simple table, i.e. transpose and remove taxonomy
+table <- as.data.frame(t(subset(biom, select = -taxonomy)))
+```
+
+#### Alpha-diversity overview
+
+```{r alpha-diversity, echo=FALSE, message=FALSE, warning=FALSE, dpi=300, fig.width=9, fig.height=6.75}
+# CPUs to use
+if (detectCores() < 50) {
+  threads_num = detectCores()
+} else {
+  threads_num = 50
+}
+
+# Alpha-diversity values calculation
+for (i in ls(pattern = "^table$")) {
+  temp_tab = get(i)
+  temp_tab_name <- "alpha"
+  
+  # Select metadata
+  if (temp_tab_name == 'alpha') {
+    temp_meta <- meta
+  }
+  
+  # Number of reads in the sample with less reads
+  temp_min <- min(rowSums(temp_tab))
+  
+  # Number of iterations
+  repeats = 100
+  
+  # Multiple rarefactions
+  temp_alpha <-
+    rtk(
+      temp_tab,
+      repeats = repeats,
+      depth = temp_min,
+      verbose = FALSE,
+      threads = threads_num,
+      margin = 1
+    )
+  
+  # Richness (observed ASVs) and diversity (Simpson's index)
+  temp_rich <- c()
+  for (i in 1:nrow(temp_tab))
+    temp_rich[i] <- mean(temp_alpha$divvs[[i]]$richness)
+  temp_div <- c()
+  for (i in 1:nrow(temp_tab))
+    temp_div[i] <- mean(temp_alpha$divvs[[i]]$simpson)
+  
+  # Alpha-diversity values + metadata
+  temp_alpha_meta <-
+    data.frame(
+      Sample = rownames(temp_tab),
+      Compartment = as.factor(temp_meta$Organ),
+      Seed = as.factor(temp_meta$Seed_origin),
+      Soil = as.factor(temp_meta$Cultivation_soil),
+      Richness = temp_rich,
+      Diversity = temp_div
+    )
+  
+  assign(paste(temp_tab_name, "meta", sep = "_"), temp_alpha_meta)
+}
+
+# Remove temp files
+rm(list = ls(pattern = "temp_"))
+
+# Subset and make a "native" pool of samples
+alpha_b5b5_l9l9 <- subset(alpha_meta, alpha_meta$Seed == "B5" & alpha_meta$Soil == "B5" | alpha_meta$Seed == "L9" & alpha_meta$Soil == "L9")
+
+# Mutate Compartment column to rename elements
+alpha_b5b5_l9l9 %<>%
+  mutate(Compartment = case_when(
+    Compartment %in% c("Seeds", "Bulk_soil") ~ Compartment,
+    TRUE ~ "Plant"
+  ))
+
+# Dodged boxplot for Richness with corrected comparisons
+richness_boxplot <- ggplot(alpha_b5b5_l9l9, aes(x = Compartment, y = Richness, fill = Soil)) +
+  geom_boxplot(position = position_dodge(0.8)) +
+  scale_fill_manual(values = c("B5" = "#84B2FF", "L9" = "#D3A780")) +
+  labs(title = "Richness by sample type",
+       x = "Type",
+       y = "Observed ASVs",
+       fill = "Origin") +
+  scale_x_discrete(labels = c("Bulk_soil" = "Bulk soil", "Plant" = "Plant", "Seeds" = "Seeds")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  )
+
+# Dodged boxplot for Diversity with corrected comparisons
+diversity_boxplot <- ggplot(alpha_b5b5_l9l9, aes(x = Compartment, y = Diversity, fill = Soil)) +
+  geom_boxplot(position = position_dodge(0.8)) +
+  scale_fill_manual(values = c("B5" = "#84B2FF", "L9" = "#D3A780")) +
+  labs(title = "Diversity by sample type",
+       x = "Type",
+       y = "Simpson's index",
+       fill = "Origin") +
+  scale_x_discrete(labels = c("Bulk_soil" = "Bulk soil", "Plant" = "Plant", "Seeds" = "Seeds")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  )
+
+# Combine the plots using cowplot
+alpha_boxplot <- plot_grid(richness_boxplot, diversity_boxplot, labels = "AUTO", ncol = 1)
+
+# Display the combined plot
+print(alpha_boxplot)
+```
+
+#### Beta-diversity overview
+
+```{r beta-diversity, echo=TRUE, message=FALSE, warning=FALSE, dpi=600, fig.width=9, fig.height=6.75}
+# Subset metadata and data: no seeds, no soil 
+meta_beta <- droplevels.data.frame(subset(meta, !(meta$Organ %in% c("Bulk_soil", "Seeds"))))
+
+tab_beta <- table[rownames(meta_beta), ] %>%
+  select(where( ~ is.numeric(.x) && sum(.x) > 1)) %>%
+  filter(rowSums(across(where(is.numeric))) > 0)
+
+# Average distances of dissimilarities in 1000 rarefactions
+tab_dist <- avgdist(tab_beta, sample = min(rowSums(tab_beta)), distfun = vegdist, dmethod = "bray", meanfun = "mean", iterations = 1000)
+
+# Convert and format to matrix
+tab_mat <- tab_dist %>%
+  as.matrix() %>%
+  as_tibble(rownames = "samples") %>%
+  pivot_longer(-samples)
+
+# Add meta columns to matrix using information from a data frame
+tab_mat_meta <- map_dfr(rownames(meta_beta), function(x) {
+  Sample <- tab_mat[tab_mat$samples == x,]
+  Type <- meta_beta$Organ[rownames(meta_beta) == x]
+  Seed_origin <- meta_beta$Seed_origin[rownames(meta_beta) == x]
+  Cultivation_soil <- meta_beta$Cultivation_soil[rownames(meta_beta) == x]
+  mat_temp <- data.frame(Sample, Type, Seed_origin, Cultivation_soil) %>%
+    filter(samples < name)
+  
+  return(mat_temp)
+})
+
+# Create named vectors for the facet labels
+seed_origin_labels <- c("B5" = "Seed origin: B5", "L9" = "Seed origin: L9")
+cultivation_soil_labels <- c("B5" = "Cultivation soil: B5", "L9" = "Cultivation soil: L9")
+
+# Jitter plot of Bray-Curtis dissimilarities
+beta_jitter <- tab_mat_meta %>%
+  ggplot(aes(x = Type, y = value)) +
+  geom_jitter(width = 0.25, color = "gray") +
+  stat_summary(
+    fun.data = median_hilow,
+    color = "red",
+    size = 0.5,
+    fun.args = list(conf.int = 0.50)
+  ) +
+  labs(x = NULL, y = "Bray-Curtis distances") +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_x_discrete(breaks = c("Panicle", "Upper_stem", "Lower_stem", "Root", "Rhizosphere"),
+                   labels = c("Panicle", "Upper stem", "Lower stem", "Root", "Rhizosphere")) +
+  facet_grid(Cultivation_soil ~ Seed_origin, labeller = labeller(
+    Seed_origin = seed_origin_labels,
+    Cultivation_soil = cultivation_soil_labels
+  )) +
+  theme_bw() +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.y = element_text(size = 16, vjust = 3),
+        strip.text = element_text(size = 16))
+
+# Display jitter plot
+print(beta_jitter)
+
+# Combine alpha plots and beta plot
+alpha_beta_plot <- plot_grid(alpha_boxplot, beta_jitter, labels = c("", "C"), ncol = 2)
+
+# Display richness, diversit and Bray-Curtis dissimilarities
+print(alpha_beta_plot)
+```
+
+#### Normalization
+
+```{r normalization, echo=TRUE, message=FALSE, warning=FALSE}
+# How many CPUs
+if (detectCores() < 50) {
+  threads_num = detectCores()
+} else {
+  threads_num = 50
+}
+
+# Multiple rarefaction function
+multi_rarefaction <- function(table) {
+  temp_min = min(rowSums(table))
+  repeats = 1000
+  cat("\n",
+      paste("Minimum rarefaction depth of:", temp_min, "reads.", sep = " "),
+      "\n")
+  temp_rar <-
+    rtk(
+      table,
+      repeats = repeats,
+      depth = temp_min,
+      verbose = FALSE,
+      threads = threads_num,
+      margin = 1,
+      ReturnMatrix = repeats
+    )
+  temp_rar_mean <- Reduce("+", temp_rar$raremat) / repeats
+  temp_tab_rar <- as.data.frame(temp_rar_mean[rownames(table),])
+  return(temp_tab_rar)
+}
+
+## Rarefy table
+table_norm <- multi_rarefaction(table)
+```
+
+#### Split train and test data
+
+```{r splitting, echo=TRUE, message=FALSE, warning=FALSE}
+# Split metadata
+meta_b5b5 <- subset(meta, meta$Seed_origin == "B5" & meta$Cultivation_soil == "B5") 
+meta_b5l9 <- meta[c(rownames(subset(meta, meta$Seed_origin == "B5" & meta$Cultivation_soil == "L9" & meta$Organ %in% c("Panicle", "Upper_stem", "Lower_stem", "Root", "Rhizosphere")))), ]
+meta_l9l9 <- subset(meta, meta$Seed_origin == "L9" & meta$Cultivation_soil == "L9")
+meta_l9b5 <- meta[c(rownames(subset(meta, meta$Seed_origin == "L9" & meta$Cultivation_soil == "B5" & meta$Organ %in% c("Panicle", "Upper_stem", "Lower_stem", "Root", "Rhizosphere")))), ]
+
+# Split table 
+table_b5b5 <- table_norm[rownames(meta_b5b5), ] %>% select(where(~ is.numeric(.x) && sum(.x) > 0))
+table_b5l9 <- table_norm[rownames(meta_b5l9), ] %>% select(where(~ is.numeric(.x) && sum(.x) > 0))
+table_l9l9 <- table_norm[rownames(meta_l9l9), ] %>% select(where(~ is.numeric(.x) && sum(.x) > 0))
+table_l9b5 <- table_norm[rownames(meta_l9b5), ] %>% select(where(~ is.numeric(.x) && sum(.x) > 0))
+```
+
+#### Pre-process data
+
+```{r pre-processing, echo=TRUE, message=FALSE, warning=FALSE}
+cat(
+  "\n",
+  "Making a train table with b5b5 and l9l9 data combined",
+  "\n"
+)
+# Select common variables (ASVs) between b5b5 and l9l9 data
+asv_list <- list(b5b5 = colnames(table_b5b5), l9l9 = colnames(table_l9l9))
+asv_comm <- Reduce(intersect, asv_list)
+table_b5b5 <- table_b5b5[, asv_comm]
+table_l9l9 <- table_l9l9[, asv_comm]
+table_b5b5_l9l9 <- rbind(table_b5b5, table_l9l9)
+
+# Feature selection
+cat(
+  "\n",
+  "Collapsing correlated variables and with nearly-zero-variance",
+  "\n"
+)
+for (i in c("Seed_origin", "Cultivation_soil")) {
+  if (i == "Seed_origin") {
+    temp_name <- "seed"
+  } else if (i == "Cultivation_soil") {
+    temp_name <- "soil"
+  }
+  cat("\n", paste("--> Target:", temp_name, sep = " "), "\n")
+  # Pre-process train data
+  temp_tab <- table_b5b5_l9l9
+  temp_meta <- meta[rownames(temp_tab), ]
+  temp_tab <- cbind(temp_tab, target = temp_meta[[i]])
+  temp_pre <- preprocess_data(
+    temp_tab,
+    outcome_colname = "target",
+    method = NULL,
+    remove_var = "nzv",
+    collapse_corr_feats = TRUE,
+    to_numeric = FALSE,
+    group_neg_corr = TRUE
+  )
+  # Ignore grouped variables (questionable)
+  temp_pro <-
+    temp_pre$dat_transformed %>% select(-matches("grp", ignore.case = TRUE))
+  temp_pro$target <- NULL
+  # Save data to an object
+  assign(paste("train", temp_name, sep = "_"), temp_pro)
+}
+
+# Remove temp files
+rm(list = ls(pattern = "temp_"))
+
+# Select variables common to train data and prediction data
+# Seed
+asv_list <- list(train = colnames(train_seed), b5l9 = colnames(table_b5l9), l9b5 = colnames(table_l9b5))
+asv_comm <- Reduce(intersect, asv_list)
+train_seed <- table_b5b5_l9l9[, asv_comm]
+b5l9_seed <- table_b5l9[, asv_comm]
+l9b5_seed <- table_l9b5[, asv_comm]
+# Soil
+asv_list <- list(train = colnames(train_soil), b5l9 = colnames(table_b5l9), l9b5 = colnames(table_l9b5))
+asv_comm <- Reduce(intersect, asv_list)
+train_soil <- table_b5b5_l9l9[, asv_comm]
+b5l9_soil <- table_b5l9[, asv_comm]
+l9b5_soil <- table_l9b5[, asv_comm]
+
+# Randomly shuffles all rows
+train_seed %<>% sample_frac(size = 1)
+b5l9_seed %<>% sample_frac(size = 1)
+l9b5_seed %<>% sample_frac(size = 1)
+train_soil %<>% sample_frac(size = 1)
+b5l9_soil %<>% sample_frac(size = 1)
+l9b5_soil %<>% sample_frac(size = 1)
+```
+
+#### Training
+
+```{r training predict, echo=TRUE, message=FALSE, warning=FALSE, dpi=600, fig.width=9, fig.height=6.75}
+# Setup classification models, tune hyper-parameters and train
+cat(
+  "\n",
+  "Training models based on b5b5 and l9l9 datasets (i.e. seed and soil from same place)",
+  "\n"
+)
+for (i in c("Seed_origin", "Cultivation_soil")) {
+  if (i == "Seed_origin") {
+    temp_name <- "seed"
+  } else if (i == "Cultivation_soil") {
+    temp_name <- "soil"
+  }
+  cat("\n", paste("--> Target:", temp_name, sep = " "), "\n")
+  temp_tab <- get(paste("train", temp_name, sep = "_"))
+  temp_meta <- meta[rownames(temp_tab),]
+  temp_tab <- cbind(temp_tab, target = temp_meta[[i]])
+  
+  # Attribute setting: define if the dataset is suitable for either binary or multi-class classification
+  positive_class = ""
+  
+  if (length(levels(as.factor(temp_tab$target))) > 2) {
+    dataset_attr = "multi-class"
+    measures <- c("classif.acc", "classif.bacc", "classif.logloss")
+    measure <- measures[2]
+  } else if (length(levels(as.factor(temp_tab$target))) == 2) {
+    dataset_attr = "binary"
+    measures <-
+      c(
+        "classif.acc",
+        "classif.bacc",
+        "classif.logloss",
+        "classif.precision",
+        "classif.recall",
+        "classif.specificity",
+        "classif.fbeta",
+        "classif.auc",
+        "classif.prauc"
+      )
+    measure <- measures[2]
+    if (positive_class == "") {
+      # Calculate the counts of each class
+      counts <- table(temp_tab$target)
+      # Find the minority class
+      minority_class <- names(which.min(counts))
+      positive_class <- minority_class
+    }
+  } else {
+    cat("The target column is neither binary nor multi-class. Please, check!")
+  }
+  
+  # Print the type of data and the classification measures used
+  cat(
+    "\n",
+    paste(
+      "The dataset is suitable for",
+      dataset_attr,
+      "classification and available measures are:\n"
+    )
+  )
+  cat(paste(measures, collapse = "\n"), "\n")
+  cat(paste("The measure selected to display the performance is:", measure),
+      "\n")
+  
+  # Create a classification task
+  task <- TaskClassif$new(id = temp_name,
+                          backend = temp_tab,
+                          target = "target")
+  
+  # Stratify resampling
+  task$set_col_roles("target", c("target", "stratum"))
+  
+  # Provide a positive class to task
+  if (dataset_attr == "binary") {
+    task$positive <- positive_class
+  }
+  
+  # Save task object
+  assign(paste(temp_name, "task", sep = "_"), task)
+  
+  # Choose methods
+  methods <- list(
+    naive_bayes = "Naive Bayes",
+    glmnet = "GLM elastic net",
+    kknn = "K-Nearest Neighbor",
+    lda = "Linear Discriminant Analysis",
+    ranger = "Random Forest",
+    svm = "Support Vector Machine",
+    xgboost = "XGBoost"
+  )
+
+  # Make learners
+  learners <- list(
+    naive_bayes = lrn("classif.naive_bayes", predict_type = "prob"),
+    glmnet = lrn("classif.glmnet", predict_type = "prob"),
+    kknn = lrn("classif.kknn", predict_type = "prob"),
+    lda = lrn("classif.lda", predict_type = "prob"),
+    ranger = lrn("classif.ranger", predict_type = "prob"),
+    svm = lrn("classif.svm", type = "C-classification", predict_type = "prob"),
+    xgboost = lrn("classif.xgboost", predict_type = "prob")
+  )
+  
+  # Set the number of threads for each learner
+  for (learner in learners) {
+    learner <- set_threads(learner, n = num_threads)
+  }
+  
+  # XGBoost metrics
+  if (dataset_attr == "binary") {
+    eval_metrics = c("error", "logloss")
+  } else if (dataset_attr == "multi-class") {
+    eval_metrics = c("merror", "mlogloss")
+  }
+  
+  # Set planned operations sequentially
+  future::plan(sequential)
+  
+  # Resampling setting
+  kfold = 10
+  repeats = 10
+  
+  # Count the observation in each target group
+  min_count <-
+    temp_tab %>% count(target) %>% arrange(n) %>% slice_head(n = 1) %>% select(n) %>% as.numeric()
+  
+  # Loop through all methods
+  for (i in 1:length(methods)) {
+    # Print the start time
+    start_time <- Sys.time()
+    cat("\n", "##### Method: ", methods[[i]], " ######", "\n")
+    cat(" Start time: ",
+        format(start_time, "%Y-%m-%d %H:%M:%S"),
+        "\n")
+    
+    method = names(methods[i])
+    learner <- learners[[method]]
+    
+    # Define resampling strategy
+    if (min_count <= kfold) {
+      inner_resampling <- rsmp("bootstrap", repeats = repeats, ratio = 1)
+    } else if (method %in% c("svm", "xgboost")) {
+      inner_resampling <- rsmp("cv", folds = kfold)
+    } else {
+      inner_resampling <-
+        rsmp("repeated_cv", folds = kfold, repeats = repeats)
+    }
+    
+    # Set up hyperparameters
+    if (method == "glmnet") {
+      learner$param_set$set_values(s = to_tune(p_dbl(1e-04, 1e4, logscale = TRUE)),
+                                   alpha = to_tune(p_dbl(0, 1)))
+    } else if (method == "kknn") {
+      # max k value
+      k = 50
+      # number of observations in the dataset
+      obs <- nrow(temp_tab)
+      # decrease k if observations are low
+      if (obs < k) {
+        k = obs / 2
+      }
+      learner$param_set$set_values(k = to_tune(p_int(1, k, logscale = TRUE)))
+    } else if (method == "ranger") {
+      learner$param_set$set_values(
+        num.trees = to_tune(p_int(10, 1000, tags = "budget")),
+        mtry.ratio = to_tune(p_dbl(0, 1)),
+        sample.fraction = to_tune(p_dbl(0.1, 1))
+      )
+    } else if (method == "svm") {
+      learner$param_set$set_values(
+        kernel = to_tune(c("polynomial", "radial", "sigmoid")),
+        cost = to_tune(1e-4, 1e4, logscale = TRUE),
+        gamma = to_tune(1e-4, 1e4, logscale = TRUE),
+        degree = to_tune(1, 5)
+      )
+      learner$timeout = c(train = 10, predict = Inf)
+      learner$encapsulate = c(train = "callr", predict = "callr")
+      learner$fallback = lrn("classif.featureless", predict_type = "prob")
+    } else if (method == "xgboost") {
+      learner$param_set$set_values(
+        nrounds = to_tune(p_int(10, 1000, tags = "budget")),
+        eta = to_tune(1e-4, 1, logscale = TRUE),
+        max_depth = to_tune(1, 20),
+        colsample_bytree = to_tune(1e-1, 1),
+        colsample_bylevel = to_tune(1e-1, 1),
+        lambda = to_tune(1e-3, 1e3, logscale = TRUE),
+        alpha = to_tune(1e-3, 1e3, logscale = TRUE),
+        subsample = to_tune(1e-1, 1),
+        eval_metric = eval_metrics
+      )
+    }
+    # Train the learner on the entire dataset
+    if (method %in% c("naive_bayes", "lda")) {
+      learner$train(task)
+    } else {
+      if (method %in% c("kknn", "glmnet")) {
+        # Define a grid search tuner
+        tuner <- tnr("grid_search", batch_size = 10)
+        # Define the terminator
+        terminator <- trm("none")
+      }
+      else if (method == "svm") {
+        # Define a random tuner
+        tuner <- tnr("random_search", batch_size = 10)
+        # Define the terminator
+        terminator <- trm("run_time", secs = 60 * term_min)
+      } else if (method == "ranger") {
+        # Define a hyperband tuner
+        tuner <- tnr("hyperband", eta = 3, repetitions = 1)
+        # Define the terminator
+        terminator <- trm("run_time", secs = 60 * term_min)
+      } else if (method == "xgboost") {
+        tuner <- tnr("hyperband", eta = 3, repetitions = 1)
+        # Define the terminator
+        terminator <- trm("none")
+      }
+      # Create a tuning instance
+      instance <- ti(
+        task = task,
+        learner = learner,
+        resampling = inner_resampling,
+        measure = msr(measure),
+        terminator = terminator
+      )
+      # Tuning hp
+      tuner$optimize(instance)
+      # Set learner with best hp
+      learner$param_set$values <- instance$result_learner_param_vals
+      # Train the learner
+      learner$train(task)
+      # Save the instance
+      assign(paste(method, "tuned", "instance", temp_name, sep = "_"),
+             instance)
+      # Save the best model
+      assign(paste(method, "tuned", "learner", temp_name, sep = "_"),
+             learner)
+    }
+    
+    # Print the end time
+    end_time <- Sys.time()
+    cat(" End time: ", format(end_time, "%Y-%m-%d %H:%M:%S"), "\n")
+    
+    # Calculate and print the time difference
+    time_diff <- difftime(end_time, start_time, units = "secs")
+    if (time_diff < 60) {
+      cat(" Time taken for algorithm ",
+          method,
+          ": ",
+          time_diff,
+          " seconds\n")
+    } else {
+      time_diff <- difftime(end_time, start_time, units = "mins")
+      cat(" Time taken for algorithm ",
+          method,
+          ": ",
+          time_diff,
+          " minutes\n")
+    }
+  }
+  # Benchmark
+  # Set the number of threads for each learner back to 1
+  cat("\n----- Benchmark with outer resampling -----\n")
+  for (learner in learners) {
+    learner <- set_threads(learner, n = 1)
+  }
+  
+  # Resampling strategy
+  if (min_count <= kfold) {
+    outer_resampling <- rsmp("bootstrap", repeats = repeats, ratio = 1)
+  } else {
+    outer_resampling <- rsmp("cv", folds = kfold)
+  }
+  
+  # Shall we use all threads?
+  future::plan(multisession, workers = num_threads)
+  
+  # Make a list of learners from methods available in "methods", tuned with best hyper-parameters
+  learners_best <- list()
+  for (i in 1:length(methods)) {
+    method = names(methods[i])
+    learner <- learners[[method]]
+    if (method %in% c("naive_bayes", "lda")) {
+      # Add the learner without tuning to the list
+      learners_best[[method]] <- learner
+    } else {
+      # Get the best model
+      best_model <-
+        get(paste(method, "tuned", "learner", temp_name, sep = "_"))
+      # Add the best model to the list
+      learners_best[[method]] <- best_model
+    }
+  }
+  
+  # Print the start time
+  start_time <- Sys.time()
+  cat(" Start time: ",
+      format(start_time, "%Y-%m-%d %H:%M:%S"),
+      "\n")
+  
+  # Benchmark the learners
+  bmr <-
+    benchmark(design = benchmark_grid(task, learners_best, outer_resampling))
+  
+  # Print the end time
+  end_time <- Sys.time()
+  cat(" End time: ", format(end_time, "%Y-%m-%d %H:%M:%S"), "\n")
+  
+  # Calculate and print the time difference
+  time_diff <- difftime(end_time, start_time, units = "secs")
+  if (time_diff < 60) {
+    cat(" Time taken for benchmarking:", time_diff, " seconds\n")
+  } else {
+    time_diff <- difftime(end_time, start_time, units = "mins")
+    cat(" Time taken for benchmarking: ", time_diff, " minutes\n")
+  }
+  
+  # Boxplots of trained models and accuracy
+  print(
+    autoplot(bmr, measure = msr(measure)) +
+      labs(x = "Method",
+           y = paste(measure, "measure")) +
+      theme_bw() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5)
+      ) +
+      scale_x_discrete(labels = as.character(unlist(methods)))
+  )
+  
+  # Convert the benchmark results to a data frame
+  bench_df <-
+    as.data.frame(bmr$aggregate(measures = lapply(measures, msr)))
+  
+  # Add a new column for the method name
+  bench_df %<>%
+    mutate(
+      method = case_when(
+      str_detect(learner_id, "naive_bayes") ~ "Naive Bayes",
+      str_detect(learner_id, "glmnet") ~ "GLM elastic net",
+      str_detect(learner_id, "kknn") ~ "K-Nearest Neighbor",
+      str_detect(learner_id, "lda") ~ "Linear Discriminant Analysis",
+      str_detect(learner_id, "ranger") ~ "Random Forest",
+      str_detect(learner_id, "svm") ~ "Support Vector Machine",
+      str_detect(learner_id, "xgboost") ~ "XGBoost",
+      TRUE ~ "Other"
+    )
+    ) %>%
+    relocate(tail(names(.), 1), .before = names(.)[1]) %>%
+    select(-nr,-resample_result,-task_id,-resampling_id,-iters) %>%
+    rename_with(
+      ~ case_when(
+        .x == "classif.acc" ~ "accuracy",
+        .x == "classif.bacc" ~ "balanced accuracy",
+        .x == "classif.precision" ~ "precision",
+        .x == "classif.recall" ~ "recall",
+        .x == "classif.specificity" ~ "specificity",
+        .x == "classif.fbeta" ~ "f1",
+        .x == "classif.auc" ~ "auc",
+        .x == "classif.prauc" ~ "pr auc",
+        .x == "classif.logloss" ~ "logloss",
+        TRUE ~ .x  # keep the original name if no condition is met
+      )
+    )
+  
+  # Save the benchmark results to an object
+  assign(paste(temp_name, "model", "benchmark", sep = "_"), bench_df)
+  
+  # Print the method name and accuracy
+  bench_df %>%
+    select(-learner_id) %>%
+    print()
+}
+
+# Clean up temp files
+rm(list = ls(pattern = "temp_"))
+```
+
+#### Benchmark heatmaps
+
+```{r heatmaps, echo = FALSE, message = FALSE, warning = FALSE, dpi=600, fig.width=9, fig.height=15}
+# Replace NaN values with zeros in both dataframes
+seed_model_benchmark[is.na(seed_model_benchmark)] <- 0
+soil_model_benchmark[is.na(soil_model_benchmark)] <- 0
+
+# Reverse the order of the methods list for factor levels
+method_levels <- rev(unlist(methods))
+
+# Reshape the seed data for the heatmap, excluding the learner_id column
+seed_data_long <- seed_model_benchmark %>%
+  select(-starts_with("learner")) %>%
+  pivot_longer(cols = -method, names_to = "measure", values_to = "value") %>%
+  mutate(value = round(value, 2))
+
+# Set the order of the method factor
+seed_data_long$method <- factor(seed_data_long$method, 
+                                levels = method_levels)
+
+# Specify the custom order for the measures
+seed_data_long$measure <- factor(seed_data_long$measure, 
+                                 levels = c("accuracy", "balanced accuracy", "logloss", 
+                                            "precision", "recall", "specificity", 
+                                            "f1", "auc", "pr auc"))
+
+# Custom labels for the measures
+custom_labels <- c("Accuracy", "Balanced accuracy", "Logloss", "Precision", 
+                   "Recall", "Specificity", "F1", "AUC", "PR-AUC")
+
+# Create the seed heatmap without legend
+seed_heatmap_plot <- ggplot(seed_data_long, aes(x = measure, y = method, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = value), color = "black", size = 3) + # Add text inside tiles
+  scale_fill_gradient2(low = "dodgerblue3", high = "red", mid = "white", 
+                       midpoint = 0.5, limit = c(0, 1), space = "Lab", 
+                       name="Performance") +
+  scale_x_discrete(labels = custom_labels) +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 10, hjust = 1),
+        axis.text.y = element_text(size = 10),
+        legend.position = "none") + # Remove legend from this plot
+  labs(title = "Seed model performance",
+       x = "Measure",
+       y = "Method") +
+  coord_fixed()
+
+# Reshape the soil data for the heatmap, excluding the learner_id column
+soil_data_long <- soil_model_benchmark %>%
+  select(-starts_with("learner")) %>%
+  pivot_longer(cols = -method, names_to = "measure", values_to = "value") %>%
+  mutate(value = round(value, 2))
+
+# Set the order of the method factor
+soil_data_long$method <- factor(soil_data_long$method, 
+                                levels = method_levels)
+
+# Specify the custom order for the measures
+soil_data_long$measure <- factor(soil_data_long$measure, 
+                                 levels = c("accuracy", "balanced accuracy", "logloss", 
+                                            "precision", "recall", "specificity", 
+                                            "f1", "auc", "pr auc"))
+
+# Create the soil heatmap with legend
+soil_heatmap_plot <- ggplot(soil_data_long, aes(x = measure, y = method, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = value), color = "black", size = 3) + # Add text inside tiles
+  scale_fill_gradient2(low = "dodgerblue3", high = "red", mid = "white", 
+                       midpoint = 0.5, limit = c(0, 1), space = "Lab", 
+                       name="Performance") +
+  scale_x_discrete(labels = custom_labels) +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 10, hjust = 1),
+        axis.text.y = element_text(size = 10),
+        legend.position = "right") + # Keep legend on the right
+  labs(title = "Soil model performance",
+       x = "Measure",
+       y = "Method") +
+  coord_fixed()
+
+# Combine the plots side by side
+combined_plot <- plot_grid(
+  seed_heatmap_plot, soil_heatmap_plot, ncol = 2, align = "v"
+)
+
+# Print the combined plot
+print(combined_plot)
+```
+
+#### Prediction
+
+```{r prediction, echo = FALSE, message = FALSE, warning = FALSE}
+# Use the best models to make predictions on swapped soils, i.e. "foreign" samples (i.e. b5l9 and l9b5)
+cat(
+  "\n",
+  "Make predictions on foreign b5l9 and l9b5 samples (i.e. seeds from plants grown on one soil, put on a different soil)",
+  "\n"
+)
+for (i in c("Seed_origin", "Cultivation_soil")) {
+  if (i == "Seed_origin") {
+    temp_name <- "seed"
+  } else if (i == "Cultivation_soil") {
+    temp_name <- "soil"
+  }
+  for (j in c("b5l9", "l9b5")) {
+    temp_id <- j
+    temp_seed <- substr(temp_id, start = 1, stop = 2)
+    temp_soil <- substr(temp_id, start = 3, stop = 4)
+
+    cat("\n", paste("--> Predict:", temp_name, sep = " "), "\n")
+    cat(
+      "\n",
+      paste(
+        "___ Seeds of plants grown on",
+        temp_seed,
+        "soil, were sown on",
+        temp_soil,
+        "soil ___",
+        sep = " "
+      ),
+      "\n"
+    )
+    temp_tab <- get(paste(temp_id, temp_name, sep = "_"))
+    temp_meta <- meta[rownames(temp_tab), ]
+    temp_tab <- cbind(temp_tab, target = temp_meta[[i]])
+    
+    # Create a classification task for the test set
+    task_test <-
+      TaskClassif$new(id = temp_id,
+                      backend = temp_tab,
+                      target = "target")
+    
+    # Provide a positive class to task
+    if (dataset_attr == "binary") {
+      task_test$positive <- positive_class
+    }
+    
+    # Initialize 'predictions' as an empty list
+    predictions <- list()
+    
+    # Loop through all methods
+    for (k in 1:length(methods)) {
+      method = names(methods[k])
+      learner <- learners[[method]]
+      if (method %in% c("naive_bayes", "lda")) {
+        # Train the learner
+        learner$train(task)
+        # Make a prediction using the learner without tuning
+        pred <- learner$predict(task_test)
+      } else {
+        # Get the best model
+        best_model <-
+          get(paste(method, "tuned", "learner", temp_name, sep = "_"))
+        # Make a prediction using the best model
+        pred <- best_model$predict(task_test)
+      }
+      # Store the prediction
+      predictions[[method]] <- pred
+      # Print the prediction accuracy
+      cat(paste(
+        "\n",
+        measure,
+        "of",
+        methods[[k]],
+        ":",
+        round(pred$score(msr(measure)), 2),
+        "\n",
+        sep = " "
+      ))
+      
+      # Get the truth and response
+      truth <- pred$truth
+      response <- pred$response
+      prob <- pred$prob
+      # Create a data frame
+      pred_df <- data.frame(truth = truth, response = response, prob, type = temp_meta$Organ)
+      # Add a column to check if the prediction matches the truth
+      pred_df$match <-
+        ifelse(pred_df$truth == pred_df$response, "TRUE", "FALSE")
+      # Save predictions on test data
+      assign(paste(method, "test", "predict", temp_id, temp_name, sep = "_"),
+             pred_df)
+      # Print number of correctly and incorrectly classified observations
+      print(pred_df %>%
+              count(match) %>%
+              mutate(ratio = round(n / sum(n), digits = 2)))
+    }
+  }
+}
+```
+
+#### Plots of prediction accuracy
+
+```{r barplots, echo = FALSE, message = FALSE, warning = FALSE, dpi=600, fig.width=15, fig.height=9}
+# First set of accuracy plots
+cat("\n", "Prediction accuracy: Evaluating the accuracy of seed and soil models on foreign samples", "\n")
+
+# Initialize lists to store TRUE/FALSE predictions for each scenario
+prediction_results <- list(
+  b5_l9_seed = list(),
+  l9_b5_seed = list(),
+  b5_l9_soil = list(),
+  l9_b5_soil = list()
+)
+
+# Data frame to store prediction accuracy
+accuracy_results <- data.frame(
+  method = character(),
+  scenario = character(),
+  accuracy = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in c("Seed_origin", "Cultivation_soil")) {
+  if (i == "Seed_origin") {
+    temp_name <- "seed"
+  } else if (i == "Cultivation_soil") {
+    temp_name <- "soil"
+  }
+  for (j in c("b5l9", "l9b5")) {
+    temp_id <- j
+    temp_seed <- substr(temp_id, start = 1, stop = 2)
+    temp_soil <- substr(temp_id, start = 3, stop = 4)
+    
+    cat("\n", paste("--> Predict:", temp_name, sep = " "), "\n")
+    cat("\n", paste("___ Seeds of plants grown on", temp_seed, "soil, were sown on", temp_soil, "soil ___", sep = " "), "\n")
+    temp_tab <- get(paste(temp_id, temp_name, sep = "_"))
+    temp_meta <- meta[rownames(temp_tab), ]
+    temp_tab <- cbind(temp_tab, target = temp_meta[[i]])
+    
+    # Create a classification task for the test set
+    task_test <- TaskClassif$new(id = temp_id, backend = temp_tab, target = "target")
+    
+    # Provide a positive class to task
+    if (dataset_attr == "binary") {
+      task_test$positive <- positive_class
+    }
+    
+    # Initialize 'predictions' as an empty list
+    predictions <- list()
+    
+    # Loop through all methods
+    for (k in 1:length(methods)) {
+      method = names(methods[k])
+      learner <- learners[[method]]
+      if (method %in% c("naive_bayes", "lda")) {
+        # Train the learner
+        learner$train(task)
+        # Make a prediction using the learner without tuning
+        pred <- learner$predict(task_test)
+      } else {
+        # Get the best model
+        best_model <- get(paste(method, "tuned", "learner", temp_name, sep = "_"))
+        # Make a prediction using the best model
+        pred <- best_model$predict(task_test)
+      }
+      # Store the prediction
+      predictions[[method]] <- pred
+      # Print and save the prediction accuracy
+      accuracy <- round(pred$score(msr(measure)), 2)
+      cat(paste("\n", measure, "of", methods[[k]], ":", accuracy, "\n", sep = " "))
+      
+      # Save accuracy to data frame
+      accuracy_results <- rbind(accuracy_results, data.frame(
+        method = methods[[k]],
+        scenario = paste(temp_seed, "to", temp_soil, "(", temp_name, ")", sep = " "),
+        accuracy = accuracy,
+        stringsAsFactors = FALSE
+      ))
+      
+      # Get the truth and response
+      truth <- pred$truth
+      response <- pred$response
+      prob <- pred$prob
+      # Create a data frame
+      pred_df <- data.frame(truth = truth, response = response, prob, type = temp_meta$Organ)
+      # Add a column to check if the prediction matches the truth
+      pred_df$match <- ifelse(pred_df$truth == pred_df$response, "TRUE", "FALSE")
+      # Save predictions on test data
+      assign(paste(method, "test", "predict", temp_id, temp_name, sep = "_"), pred_df)
+      # Print number of correctly and incorrectly classified observations
+      print(pred_df %>% count(match) %>% mutate(ratio = round(n / sum(n), digits = 2)))
+      
+      # Store the results in the corresponding list
+      result_key <- paste(temp_id, temp_name, sep = "_")
+      if (is.null(prediction_results[[result_key]])) {
+        prediction_results[[result_key]] <- list()
+      }
+      prediction_results[[result_key]][[method]] <- pred_df %>% count(match)
+    }
+  }
+}
+
+# Check the contents of prediction_results and accuracy_results
+print(prediction_results)
+print(accuracy_results)
+
+# Combine the prediction results into data frames
+create_combined_df <- function(result_list, methods) {
+  combined_df <- do.call(rbind, lapply(names(result_list), function(method) {
+    df <- result_list[[method]]
+    if (is.null(df)) {
+      return(NULL)
+    }
+    df$method <- methods[[method]]
+    return(df)
+  }))
+  return(combined_df)
+}
+
+data_b5_l9_seed <- create_combined_df(prediction_results$b5_l9_seed, methods)
+data_l9_b5_seed <- create_combined_df(prediction_results$l9_b5_seed, methods)
+data_b5_l9_soil <- create_combined_df(prediction_results$b5_l9_soil, methods)
+data_l9_b5_soil <- create_combined_df(prediction_results$l9_b5_soil, methods)
+
+# Check and print data to confirm
+print(data_b5_l9_seed)
+print(data_l9_b5_seed)
+print(data_b5_l9_soil)
+print(data_l9_b5_soil)
+
+# Verify that prediction_results and accuracy_results are correctly populated
+print(prediction_results)
+print(accuracy_results)
+
+# Create a helper function to convert the prediction_results into a plot-ready format
+prepare_plot_data <- function(prediction_results, methods) {
+  combined_df <- do.call(rbind, lapply(names(prediction_results), function(result_key) {
+    result_list <- prediction_results[[result_key]]
+    do.call(rbind, lapply(names(result_list), function(method) {
+      df <- result_list[[method]]
+      df$method <- methods[[method]]
+      df$scenario <- result_key
+      return(df)
+    }))
+  }))
+  combined_df <- combined_df %>%
+    group_by(method, scenario) %>%
+    mutate(proportion = n / sum(n))
+  return(combined_df)
+}
+
+# Prepare the data for plotting
+plot_data <- prepare_plot_data(prediction_results, methods)
+
+# Verify the plot data
+print(plot_data)
+
+# Create the proportional barplots
+create_plot <- function(data, title) {
+  ggplot(data, aes(x = factor(method, levels = unlist(methods)), y = proportion, fill = match, label = scales::percent(proportion))) +
+    geom_bar(stat = "identity", position = "fill") +
+    geom_text(position = position_fill(vjust = 0.5), color = "white") +
+    scale_fill_manual(values = c("TRUE" = "dodgerblue4", "FALSE" = "firebrick")) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = title, y = "Proportion", x = "")
+}
+
+# Split the data into different plots
+plot_data_b5_l9_seed <- plot_data %>% filter(scenario == "b5l9_seed")
+plot_data_l9_b5_seed <- plot_data %>% filter(scenario == "l9b5_seed")
+plot_data_b5_l9_soil <- plot_data %>% filter(scenario == "b5l9_soil")
+plot_data_l9_b5_soil <- plot_data %>% filter(scenario == "l9b5_soil")
+
+# Generate the plots
+plot_proportional_b5_l9_seed <- create_plot(plot_data_b5_l9_seed, "Proportional Data of B5-derived seeds on L9 soil (Seed-based Model)")
+plot_proportional_l9_b5_seed <- create_plot(plot_data_l9_b5_seed, "Proportional Data of L9-derived seeds on B5 soil (Seed-based Model)")
+plot_proportional_b5_l9_soil <- create_plot(plot_data_b5_l9_soil, "Proportional Data of B5-derived seeds on L9 soil (Soil-based Model)")
+plot_proportional_l9_b5_soil <- create_plot(plot_data_l9_b5_soil, "Proportional Data of L9-derived seeds on B5 soil (Soil-based Model)")
+
+# Combine the proportional plots using cowplot
+plot_combined <- plot_grid(
+  plot_proportional_b5_l9_seed + theme(plot.title = element_text(size = 10)),
+  plot_proportional_l9_b5_seed + theme(plot.title = element_text(size = 10)),
+  plot_proportional_b5_l9_soil + theme(plot.title = element_text(size = 10)),
+  plot_proportional_l9_b5_soil + theme(plot.title = element_text(size = 10)),
+  ncol = 2, nrow = 2,
+  labels = c("A", "B", "C", "D"),
+  label_size = 15
+)
+
+# Display the combined plot
+print(plot_combined)
+
+##############################
+
+# Second set of accuracy plots
+cat("\n", "Prediction accuracy: Proportion of TRUE and FALSE predictions across sample types by algorithm and model", "\n")
+
+# Combine prediction data frames from all methods and models
+prediction_dfs <- list()
+for (method in names(methods)) {
+  for (model in c("b5l9_seed", "l9b5_seed", "b5l9_soil", "l9b5_soil")) {
+    pred_df <- get(paste(method, "test", "predict", model, sep = "_"))
+    pred_df$group <- method
+    pred_df$model <- model
+    prediction_dfs <- append(prediction_dfs, list(pred_df))
+  }
+}
+
+# Combine all prediction data frames into a single data frame
+combined_predictions <- do.call(rbind, prediction_dfs)
+
+# Ensure factor levels for group are in the specified order
+combined_predictions$group <- factor(combined_predictions$group, 
+                                     levels = names(methods), 
+                                     labels = methods)
+
+# Calculate the proportions of TRUE and FALSE predictions
+prop_data <- combined_predictions %>%
+  group_by(group, model, type, match) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(group, model, type) %>%
+  mutate(proportion = count / sum(count) * 100) %>%
+  ungroup()
+
+# Create the stacked barplot
+stacked_barplot <- ggplot(prop_data, aes(x = type, y = proportion, fill = match, label = round(proportion, 1))) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(position = position_stack(vjust = 0.5), size = 3, color = "white") +
+  facet_grid(factor(model, levels = c("b5l9_seed", "l9b5_seed", "b5l9_soil", "l9b5_soil"), 
+                    labels = c("B5L9 seed model", "L9B5 seed model", "B5L9 soil model", "L9B5 soil model")) ~ group) +
+  scale_fill_manual(values = c("TRUE" = "dodgerblue4", "FALSE" = "firebrick")) +
+  labs(
+    title = "Proportion of TRUE and FALSE predictions across sample types by algorithm and model",
+    x = "Sample type",
+    y = "Proportion (%)",
+    fill = "Prediction match"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text.x = element_text(size = 10, face = "bold"),
+    strip.text.y = element_text(size = 10, face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+
+# Display the stacked barplot
+print(stacked_barplot)
+
+##############################
+
+# Third set of accuracy plots
+cat("\n", "Prediction accuracy: Radar plots of TRUE and FALSE predictions across sample types by algorithm and model", "\n")
+
+# Filter for TRUE predictions
+true_predictions <- combined_predictions %>% filter(match == "TRUE")
+
+# Function to create radar data and plot for each model
+for (model in c("b5l9_seed", "l9b5_seed", "b5l9_soil", "l9b5_soil")) {
+  # Count the number of TRUE predictions for each combination of method and sample type
+  count_data <- true_predictions %>%
+    filter(model == !!model) %>%
+    group_by(group, type) %>%
+    summarise(count = n(), .groups = 'drop')
+  
+  # Convert `type` to factors with specific order
+  count_data$type <- factor(
+    count_data$type,
+    levels = c("Panicle", "Upper_stem", "Lower_stem", "Root", "Rhizosphere")
+  )
+  
+  # Reshape data for radar chart
+  radar_data <- count_data %>%
+    pivot_wider(
+      names_from = type,
+      values_from = count,
+      values_fill = list(count = 0)
+    )
+  
+  # Plot the radar chart
+  temp_radar <- ggradar2(
+    radar_data,
+    gridline.label = seq(0, 3, 1),
+    group.line.width = 1,
+    group.point.size = 5,
+    group.colours = c(
+      '#EE6677',
+      '#228833',
+      '#4477AA',
+      '#CCBB44',
+      '#66CCEE',
+      '#AA3377',
+      '#BBBBBB'
+    ),
+    gridline.label.type = "numeric",
+    background.circle.colour = "white",
+    gridline.mid.colour = "darkgrey"
+  )
+  
+  # Save the plot as an object
+  assign(paste(model, "radar", sep = "_"), temp_radar)
+}
+
+# Combine the plots using cowplot
+radar_plots <- plot_grid(
+  b5l9_seed_radar,
+  l9b5_seed_radar,
+  b5l9_soil_radar,
+  l9b5_soil_radar,
+  labels = c(
+    "B5-derived seeds on L9 soil (Seed-based Model)",
+    "L9-derived seeds on B5 soil (Seed-based Model)",
+    "B5-derived seeds on L9 soil (Soil-based Model)",
+    "L9-derived seeds on B5 soil (Soil-based Model)"
+  ),
+  ncol = 2
+)
+
+# Display the combined plot
+print(radar_plots)
+```
+
+#### Networks of important features
+
+```{r importance, echo = FALSE, message = FALSE, warning = FALSE, dpi=600, fig.width=9, fig.height=6.75}
+# Select the random forest method
+method = "ranger"
+
+# Loop through the seed and soil models
+for (i in c("Seed_origin", "Cultivation_soil")) {
+  if (i == "Seed_origin") {
+    temp_name <- "seed"
+  } else if (i == "Cultivation_soil") {
+    temp_name <- "soil"
+  }
+  cat(
+    "\n",
+    paste(
+      "----------",
+      "Working on",
+      temp_name,
+      "model",
+      "----------",
+      sep = " "
+    ),
+    "\n"
+  )
+  # Get model
+  temp_model <- get(paste(method, "tuned", "learner", temp_name, sep = "_"))
+  # Loop through each dataset
+  temp_tab <- get(paste("train", temp_name, sep = "_"))
+  temp_meta <- meta[rownames(temp_tab), ]
+  temp_tab <- cbind(temp_tab, target = temp_meta[[i]])
+
+  # Extract hyperparameter from the model
+  mtry_ratio <- temp_model$param_set$values$mtry.ratio
+  num_trees <- temp_model$param_set$values$num.trees
+
+  # Calculate mtry
+  num_features <- ncol(temp_tab)
+  mtry <- ceiling(mtry_ratio * num_features)
+
+  # Calculate important features via permutations
+  temp_rf <- rfPermute(
+    target ~ .,
+    data = temp_tab,
+    mtry = mtry,
+    ntree = num_trees,
+    nrep = 1000,
+    na.action = na.omit,
+    num.cores = num_threads / 2,
+    importance = TRUE
+  )
+
+  # Build a feature df
+  temp_imp <- as.data.frame(importance(temp_rf, scale = TRUE, decreasing = TRUE))
+  assign(paste(temp_id, temp_name, "imp", sep = "_"), temp_imp)
+
+  # Select features with Mean Decrease Accuracy p-val < .05
+  temp_imp_sel <- temp_imp %>%
+    filter(MeanDecreaseAccuracy.pval < 0.05)
+  assign(paste(temp_name, "imp", "sig", sep = "_"), temp_imp_sel)
+
+  # Add an extra column with the score winner: B5 or L9, depending on which is higher
+  temp_imp_sel <- temp_imp_sel %>%
+    mutate(Score = if_else(B5 > L9, "B5", "L9"))
+
+  # Ensure the node names in temp_graph match the rownames in temp_imp_sel
+  node_names <- rownames(temp_imp_sel)
+  temp_imp_sel <- temp_imp_sel[match(node_names, rownames(temp_imp_sel)), ]
+
+  # Build adjacency matrix
+  temp_corr <- corr.test(temp_tab[, node_names], adjust = "fdr", method = "spearman")
+  temp_corr_r <- as.data.frame(temp_corr$r)
+  cor.cutoff <- 0.3
+  temp_adj <- ifelse(abs(temp_corr_r) >= cor.cutoff, 1, 0)
+
+  # Build a network
+  temp_net <- graph_from_adjacency_matrix(temp_adj, mode = "undirected", diag = FALSE)
+
+  # Make igraph object tidy
+  temp_graph <- tidygraph::as_tbl_graph(temp_net) %>%
+    activate(nodes) %>%
+    mutate(
+      name = node_names,
+      Score = temp_imp_sel$Score,
+      MeanDecreaseAccuracy = temp_imp_sel$MeanDecreaseAccuracy
+    )
+
+  cat("\n", "Number of vertices (nodes)", "\n")
+  print(gorder(temp_graph))
+
+  cat("\n", "Number of edges", "\n")
+  print(gsize(temp_graph))
+
+  cat("\n", "Density", "\n")
+  print(edge_density(temp_graph))
+
+  cat("\n", "Average path length", "\n")
+  print(mean_distance(temp_graph, directed = FALSE))
+
+  cat("\n", "Network diameter", "\n")
+  print(diameter(temp_graph, directed = FALSE))
+
+  cat("\n", "Degree centrality", "\n")
+  print(sort(degree(temp_graph, mode = "all"), decreasing = TRUE))
+
+  cat("\n", "Closeness centrality", "\n")
+  print(sort(closeness(temp_graph), decreasing = TRUE))
+
+  cat("\n", "Betweenness centrality", "\n")
+  print(sort(betweenness(temp_graph, directed = FALSE), decreasing = TRUE))
+
+  cat("\n", "Eigenvector centrality", "\n")
+  print(sort(eigen_centrality(temp_graph)$vector, decreasing = TRUE))
+
+  # Generate network graphs
+  temp_graph_plot <- ggraph(temp_graph, layout = "fr") +
+  geom_edge_arc(colour = "gray80",
+                lineend = "round",
+                strength = .1) +
+  geom_node_point(aes(
+    fill = Score,
+    shape = Score,
+    size = MeanDecreaseAccuracy
+  ),
+  stroke = 1) +
+  geom_node_text(
+    aes(label = name),
+    repel = TRUE,
+    point.padding = unit(0.2, "lines"),
+    size = 4,
+    colour = "gray10"
+  ) +
+  scale_fill_manual(values = c('B5' = "#84B2FF", 'L9' = "#D3A780"),
+                    name = "Score") +
+  scale_shape_manual(values = c('B5' = 21, 'L9' = 21), guide = "none") +
+  scale_size_continuous(
+    name = "Adjusted Mean Decrease Accuracy",
+    limits = c(min_acc, max_acc),
+    breaks = c(round(min_acc, digits = 2), round((min_acc+max_acc)/2, digits = 2), round(max_acc, digits = 2))
+  ) +
+  scale_edge_width(range = c(0, 1.5)) +
+  scale_edge_alpha(range = c(0, .8)) +
+  theme_graph(background = "white") +
+  ggtitle(
+    paste(
+      "Network of the",
+      temp_name,
+      "model",
+      sep = " "
+    )
+  ) +
+  guides(
+    fill = guide_legend(
+      title = "Score",
+      override.aes = list(
+        size = 5,
+        shape = 21,
+        fill = c("#84B2FF", "#D3A780")
+      ),
+      order = 1
+    ),
+    size = guide_legend(
+      title = "Mean Decrease Accuracy",
+      override.aes = list(shape = 21),
+      order = 2
+    )
+  )
+
+  # Save the plot
+  assign(paste(temp_name, "network", sep = "_"), temp_graph_plot)
+}
+
+# Retrieve the network plots from the environment
+network_list <- mget(ls(pattern = "_network"))
+
+# Create list of plots with titles
+plot_list <- list(
+  plot_grid(ggdraw() + draw_label("Seed model", fontface = 'bold', size = 15) + draw_plot(network_list[[1]]), ncol = 1),
+  plot_grid(ggdraw() + draw_label("Soil model", fontface = 'bold', size = 15) + draw_plot(network_list[[2]]), ncol = 1)
+)
+
+# Combine the plots using cowplot
+combined_plot <- plot_grid(
+  plotlist = plot_list,
+  ncol = 2
+)
+
+# Display the combined plot
+print(combined_plot)
+```
