@@ -29,9 +29,9 @@ These methodologies show the potential of using microbial variables to develop p
 ## Table of Contents
 - [Rationale](#rationale)
 - [Introduction](#introduction)
-- [First case study](#first_case_study)
-- [Second case study](#second_case_study)
-- [Running the code](#run_the_code)
+- [First case study](#first-case-study)
+- [Second case study](#second-case-study)
+- [Running the code](#run-the-code)
 - [Acknowledgements](#acknowledgements)
 - [Citations](#citations)
 
