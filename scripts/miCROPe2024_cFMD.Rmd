@@ -1,0 +1,1400 @@
+---
+title: "Harnessing machine learning for predictive tools in microbiome studies: a focus on amplicon sequence variants and metagenomic shotgun sequencing"
+subtitle: "Second case study: cFMD - curated Food Microbiome Data repository"
+author: 
+- "Livio Antonielli"
+- "Niccolò Carlino"
+- "Nicola Segata"
+date: "July 29, 2024"
+eeditor_options: 
+  chunk_output_type: console
+format: html
+editor: visual
+always_allow_html: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+#### Setup PATH
+
+```{r setting wd, echo = FALSE, message = FALSE, warning = FALSE}
+setwd("~/miCROPe2024/")
+```
+
+#### Install and source libraries
+
+```{r sourcing pkgs, echo=FALSE, message=FALSE, warning=FALSE}
+# List of packages to be installed from GitHub
+github_packages <- c("mlr-org/mlr3extralearners@*release", "mlr-org/mlr3proba", "PlantedML/randomPlantedForest", "catboost/catboost")
+
+# Function to check if a package is installed
+is_installed <- function(pkg) is.element(pkg, installed.packages()[, "Package"])
+
+# Install 'devtools' package if not installed
+if (!is_installed("devtools")) {
+  install.packages("devtools")
+}
+
+# Load 'devtools' package
+library(devtools)
+
+# Install 'remotes' package if not installed
+if (!is_installed("remotes")) {
+  install.packages("remotes")
+}
+
+# Load 'remotes' package
+library(remotes)
+
+# Install packages from GitHub
+for (pkg in github_packages) {
+  if (!is_installed(pkg)) {
+    if (pkg == "catboost/catboost") {
+      devtools::install_github('catboost/catboost', subdir = 'catboost/R-package')
+    } else {
+      remotes::install_github(pkg)
+    }
+  }
+}
+  
+# Load libraries
+if (!require("pacman"))
+  install.packages("pacman")
+pacman::p_load(
+  callr,
+  catboost,
+  corrplot,
+  cowplot,
+  farff,
+  future,
+  future.apply,
+  gridExtra,
+  iml,
+  lightgbm,
+  magrittr,
+  mikropml,
+  mlr3extralearners,
+  mlr3hyperband,
+  mlr3proba,
+  mlr3verse,
+  mlr3tuning,
+  mlr3tuningspaces,
+  mlr3viz,
+  OpenML,
+  parallel,
+  paradox,
+  psych,
+  randomForestSRC,
+  randomPlantedForest,
+  tidyheatmaps,
+  tidyverse,
+  wordcloud,
+  wordcloud2,
+  install = TRUE
+)
+```
+
+#### Import data
+
+```{r import, echo=FALSE, message=FALSE, warning=FALSE}
+# GitHub URL
+url <- "https://raw.githubusercontent.com/SegataLab/cFMD/main/cFMD_taxonomic_profiles.tsv"
+
+# import the TSV file
+tab <- read.table(url, header = TRUE, row.names = 1, sep = "\t")
+
+# Transpose table
+tab_pre <- as.data.frame(t(tab))
+
+# Assign original row names as column names
+colnames(tab_pre) <- rownames(tab)
+```
+
+#### Set parameters
+
+```{r selecting dataset, echo = FALSE, message = FALSE, warning = FALSE}
+# Reduce verbosity
+lgr::get_logger("mlr3")$set_threshold("warn")
+lgr::get_logger("bbotk")$set_threshold("warn")
+
+# Set seed for reproducibility
+seed = 20240718
+set.seed(seed)
+
+# Set number of CPUs
+num_threads = detectCores()
+
+# Time for an algorithm to run before a terminator will kill the tuning instance, in minutes
+term_min = 15
+
+# Define a variable to use as target. Use either category, type, or subtype.
+target <- "category"
+```
+
+#### Visualize data
+
+```{r visualize, echo = FALSE, message = FALSE, warning = FALSE}
+# Count the number of observations for each category level
+category_counts <- tab_pre %>%
+  group_by(category) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(category = str_replace_all(category, "_", " "))
+
+# Create a lollipop chart for the number of observations in each category
+lolli_1 <- ggplot(category_counts, aes(x = reorder(category, count), y = count)) +
+  geom_segment(aes(xend = category, yend = 0),
+               color = "steelblue",
+               linewidth = 1.2) +
+  geom_point(color = "steelblue", size = 12) +
+  geom_text(
+    aes(label = count),
+    color = "white",
+    fontface = "bold",
+    size = 3
+  ) +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Number of samples for each category", x = target, y = "Count") +
+  theme(
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  )
+
+# Count the number of distinct type levels within each category
+types_per_category <- tab_pre %>%
+  group_by(category) %>%
+  summarise(type_count = n_distinct(type)) %>%
+  ungroup() %>%
+  mutate(category = str_replace_all(category, "_", " "))
+
+# Create a lollipop chart for the number of types within each category
+lolli_2 <- ggplot(types_per_category, aes(x = reorder(category, type_count), y = type_count)) +
+  geom_segment(aes(xend = category, yend = 0),
+               color = "darkorange",
+               linewidth = 1.2) +
+  geom_point(color = "darkorange", size = 12) +
+  geom_text(
+    aes(label = type_count),
+    color = "white",
+    fontface = "bold",
+    size = 3
+  ) +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Number of types within each category", x = NULL, y = "Number of types") +
+  theme(
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  )
+
+# combined lolli plot
+lolli_plot <- plot_grid(lolli_1, lolli_2, ncol = 2, rel_widths = c(1, 1))
+lolli_plot
+
+# Filter the data for the dairy category
+dairy_data <- tab_pre %>%
+  filter(category == "dairy") %>%
+  mutate(type = str_replace_all(type, "_", " "))
+
+# Count the number of observations for each dairy type
+dairy_counts <- dairy_data %>%
+  group_by(type) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+# Create a barplot with the number of observations for each dairy type
+dairy_plot <- ggplot(dairy_counts, aes(x = reorder(type, count), y = count)) +
+  geom_bar(stat = "identity", fill = "darkcyan") +
+  geom_text(aes(label = count), vjust = -0.5, size = 4) +
+  theme_minimal() +
+  labs(title = "Number of samples for each dairy type", x = "Dairy type", y = "Count") +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  )
+
+print(dairy_plot)
+
+# Filter the data for the dairy category and cheese type
+cheese_data <- tab_pre %>%
+  filter(category == "dairy" & type == "cheese") %>%
+  mutate(subtype = str_replace_all(subtype, "_", " "))
+
+# Count the number of observations for each cheese subtype
+cheese_counts <- cheese_data %>%
+  group_by(subtype) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+# Prepare data for the word cloud
+cheese_wordcloud_data <- cheese_counts %>%
+  rename(word = subtype, freq = count)
+
+# Filter the cheese_wordcloud_data to include only the specified varieties
+cheese_wordcloud_data <- cheese_counts %>%
+  rename(word = subtype, freq = count)
+
+# Create the word cloud
+wordcloud(
+  words = cheese_wordcloud_data$word,
+  freq = cheese_wordcloud_data$freq,
+  min.freq = 1,
+  max.words = 200,
+  random.order = FALSE,
+  rot.per = 0.35,
+  scale = c(2.5, 0.25),
+  colors = brewer.pal(8, "Dark2")
+)
+#wordcloud2(cheese_wordcloud_data, size = 0.7, color = 'random-dark')
+```
+
+#### Pre-process data
+
+```{r pre-process, echo = FALSE, message = FALSE, warning = FALSE}
+# Convert character columns as factors and keep only microbial variables and target factor
+tab_sel <- tab_pre %>% mutate(across(starts_with("k__"), as.numeric)) %>% 
+  mutate(across(where(is_character), as_factor)) %>% 
+  select(!!as.symbol(target), starts_with("k__"))
+
+# Rename the target column as "target"
+colnames(tab_sel)[which(names(tab_sel) == target)] <- "target"
+
+# Remove rows corresponding to classes with < 10 observations
+tab_sel %<>%
+  group_by(target) %>%
+  mutate(n = n()) %>%
+  filter(n >= 10) %>%
+  select(-n) %>%
+  as.data.frame() %>%
+  droplevels.data.frame()
+
+# Define if the dataset is suitable for either binary or multi-class classification
+# as.data.table(mlr_measures)
+positive_class = ""
+
+if (length(levels(as.factor(tab_sel$target))) > 2) {
+  dataset_attr = "multi-class"
+  measures <- c("classif.acc", "classif.bacc", "classif.logloss")
+  measure <- measures[2]
+} else if (length(levels(as.factor(tab_sel$target))) == 2) {
+  dataset_attr = "binary"
+  measures <-
+    c(
+      "classif.acc",
+      "classif.bacc",
+      "classif.logloss",
+      "classif.precision",
+      "classif.recall",
+      "classif.specificity",
+      "classif.fbeta",
+      "classif.auc",
+      "classif.prauc"
+    )
+  measure <- measures[2]
+  if (positive_class == "") {
+    # Calculate the counts of each class
+    counts <- table(tab_sel$target)
+    # Find the minority class
+    minority_class <- names(which.min(counts))
+    positive_class <- minority_class
+  }
+} else {
+  cat("The target column is neither binary nor multi-class. Please, check!")
+}
+
+# Print the type of data and the classification measures used
+cat("\n", paste("The dataset is suitable for", dataset_attr, "classification and available measures are:\n"))
+cat(paste(measures, collapse = "\n"), "\n")
+cat(paste("The measure selected to display the performance is:", measure), "\n")
+
+# Scaling and collapsing (nearly) perfectly correlated variables
+tab_sel %<>% rename_with(~ gsub("\\|", "_", .))
+tab_pro <- preprocess_data(
+  tab_sel,
+  outcome_colname = "target",
+  method = c("center", "scale"),
+  remove_var = "nzv",
+  collapse_corr_feats = TRUE,
+  to_numeric = TRUE,
+  group_neg_corr = TRUE,
+  prefilter_threshold = 1
+)
+tab_pro <- tab_pro$dat_transformed
+
+# Create a new table for building plots
+temp_data <- tab_pro
+
+# Function to parse taxon names to keep everything after "_s__" and replace "_t__" with "_"
+parse_taxon_name <- function(name) {
+  parsed_name <- str_extract(name, "(?<=_s__).*")
+  parsed_name <- str_replace_all(parsed_name, "_t__", "_")
+  return(parsed_name)
+}
+
+# Simplify column names
+colnames(temp_data)[2:ncol(temp_data)] <- sapply(colnames(temp_data)[2:ncol(temp_data)], parse_taxon_name)
+
+# Convert to tidy format
+temp_tidy_data <- temp_data %>%
+  pivot_longer(-target, names_to = "taxon", values_to = "abundance")
+
+# Summarize duplicates by taking the mean abundance
+temp_mean_data <- temp_tidy_data %>%
+  group_by(taxon, target) %>%
+  summarise(abundance = mean(abundance, na.rm = TRUE), .groups = 'drop')
+
+# Generate heatmap
+tidyheatmap(
+  df = temp_mean_data,
+  rows = taxon,
+  columns = target,
+  values = abundance,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  angle_col = 45
+)
+
+# Reshape to wide format for correlation
+temp_wide_data <- temp_mean_data %>%
+  pivot_wider(names_from = taxon, values_from = abundance) %>%
+  column_to_rownames("target") %>%
+  as.data.frame()
+
+# Function to parse taxon names to keep everything starting with "SGB"
+parse_taxon_name <- function(name) {
+  parsed_name <- str_extract(name, "(SGB\\d+.*|EUK\\d+.*)")
+  return(parsed_name)
+}
+
+# Simplify column names
+colnames(temp_wide_data)[1:ncol(temp_wide_data)] <- sapply(colnames(temp_wide_data)[1:ncol(temp_wide_data)], parse_taxon_name)
+
+# Compute correlation
+corr <- corr.test(temp_wide_data,
+          adjust = "fdr",
+          method = "spearman")
+
+# Generate correlation plot
+corrplot(
+  as.matrix(corr$r),
+  p.mat = as.matrix(corr$p),
+  sig.level = 0.05,
+  insig = 'blank',
+  order = 'hclust',
+  method = 'pie',
+  col.lim = c(-1, 1),
+  col = colorRampPalette(c("blue", "white", "red"))(200)
+)
+
+rm(list = ls(pattern = "temp_"))
+```
+
+#### Train models
+
+```{r classification, echo=FALSE, message=FALSE, warning=FALSE}
+# Reproducible randomization
+tab_pro %<>% sample_frac(size = 1)
+
+# Random sampling on defined split
+tab_train <-
+  tab_pro %>% mutate(id = rownames(tab_pro)) %>% sample_frac(0.80)
+tab_test  <-
+  tab_pro %>% mutate(id = rownames(tab_pro)) %>% anti_join(tab_train, tab_pro, by = 'id') %>% select(-id)
+tab_train$id <- NULL
+
+# Create a classification task
+task <- TaskClassif$new(id = "cFMD",
+                              backend = tab_train,
+                              target = "target")
+
+# Stratify resampling
+task$set_col_roles("target", c("target", "stratum"))
+
+# Provide a positive class to task
+if (dataset_attr == "binary") {
+  task$positive <- positive_class
+}
+
+# Choose methods
+methods <- list(
+  lda = "Linear Discriminant Analysis",
+  ranger = "Random Forest",
+  xgboost = "XGBoost"
+)
+
+# Make learners
+learners <- list(
+  lda = lrn("classif.lda", predict_type = "prob"),
+  ranger = lrn("classif.ranger", predict_type = "prob"),
+  xgboost = lrn("classif.xgboost", predict_type = "prob")
+)
+
+# Set the number of threads for each learner
+for (learner in learners) {
+  learner <- set_threads(learner, n = num_threads)
+}
+
+# XGBoost metrics
+if (dataset_attr == "binary") {
+  eval_metrics = c("error", "logloss")
+} else if (dataset_attr == "multi-class") {
+  eval_metrics = c("merror", "mlogloss")
+}
+
+# Set planned operations sequentially
+future::plan(sequential)
+
+# Resampling setting
+kfold = 10
+repeats = 10
+
+# Count the observation in each target group
+min_count <-
+  tab_pro %>% count(target) %>% arrange(n) %>% slice_head(n = 1) %>% select(n) %>% as.numeric()
+
+# Loop through all methods
+for (i in 1:length(methods)) {
+  # Print the start time
+  start_time <- Sys.time()
+  cat("\n", "##### Method: ", methods[[i]], " ######", "\n")
+  cat(" Start time: ", format(start_time, "%Y-%m-%d %H:%M:%S"), "\n")
+
+  method = names(methods[i])
+  learner <- learners[[method]]
+  
+  # Define resampling strategy
+  if (min_count <= kfold) {
+    inner_resampling <- rsmp("bootstrap", repeats = repeats, ratio = 1)
+  } else if (method == "xgboost") {
+    inner_resampling <- rsmp("cv", folds = kfold)
+  } else {
+    inner_resampling <-
+      rsmp("repeated_cv", folds = kfold, repeats = repeats)
+  }
+
+  # Set up hyperparameters
+ if (method == "ranger") {
+    learner$param_set$set_values(num.trees = to_tune(p_int(10, 1000, tags = "budget")),
+                                 mtry.ratio = to_tune(p_dbl(0, 1)),
+                                 sample.fraction = to_tune(p_dbl(0.1, 1)))
+  } else if (method == "xgboost") {
+    learner$param_set$set_values(
+      nrounds = to_tune(p_int(10, 1000, tags = "budget")),
+      eta = to_tune(1e-4, 1, logscale = TRUE),
+      max_depth = to_tune(1, 20),
+      colsample_bytree = to_tune(1e-1, 1),
+      colsample_bylevel = to_tune(1e-1, 1),
+      lambda = to_tune(1e-3, 1e3, logscale = TRUE),
+      alpha = to_tune(1e-3, 1e3, logscale = TRUE),
+      subsample = to_tune(1e-1, 1),
+      eval_metric = eval_metrics
+    )
+  }
+  # Train the learner on the entire dataset
+  if (method == "lda") {
+    learner$train(task)
+  } else {
+    if (method == "ranger") {
+      # Define a hyperband tuner
+      tuner <- tnr("hyperband", eta = 3, repetitions = 1)
+      # Define the terminator
+      terminator <- trm("run_time", secs = 60 * term_min)
+    } else if (method == "xgboost") {
+      tuner <- tnr("hyperband", eta = 3, repetitions = 1)
+      # Define the terminator
+      terminator <- trm("none")
+    }
+    # Create a tuning instance
+    instance <- ti(
+      task = task,
+      learner = learner,
+      resampling = inner_resampling,
+      measure = msr(measure),
+      terminator = terminator
+    )
+    # Tuning hp
+    tuner$optimize(instance)
+    # Set learner with best hp
+    learner$param_set$values <- instance$result_learner_param_vals
+    # Train the learner
+    learner$train(task)
+    # Save the instance
+    assign(paste(method, "tuned", "instance", target, sep = "_"), instance)
+    # Save the best model
+    assign(paste(method, "tuned", "learner", target, sep = "_"), learner)
+  }
+
+  # Print the end time
+  end_time <- Sys.time()
+  cat(" End time: ", format(end_time, "%Y-%m-%d %H:%M:%S"), "\n")
+
+  # Calculate and print the time difference
+  time_diff <- difftime(end_time, start_time, units = "secs")
+  if (time_diff < 60) {
+    cat(" Time taken for algorithm ",
+        method,
+        ": ",
+        time_diff,
+        " seconds\n")
+  } else {
+    time_diff <- difftime(end_time, start_time, units = "mins")
+    cat(" Time taken for algorithm ",
+        method,
+        ": ",
+        time_diff,
+        " minutes\n")
+  }
+}
+```
+
+#### Benchmark
+
+```{r benchmarking, echo = FALSE, message = FALSE, warning = FALSE}
+# Set the number of threads for each learner back to 1
+for (learner in learners) {
+  learner <- set_threads(learner, n = 1)
+}
+
+# Shall we use all threads?
+future::plan(multisession, workers = num_threads)
+
+# Resampling strategy
+if (min_count <= kfold) {
+  outer_resampling <- rsmp("bootstrap", repeats = repeats, ratio = 1)
+} else {
+  outer_resampling <- rsmp("cv", folds = kfold)
+}
+
+# Make a list of learners from methods available in "methods", tuned with best hyper-parameters
+learners_best <- list()
+for (i in 1:length(methods)) {
+  method = names(methods[i])
+  learner <- learners[[method]]
+  if (method == "lda") {
+    # Add the learner without tuning to the list
+    learners_best[[method]] <- learner
+  } else {
+    # Get the best model
+    best_model <- get(paste(method, "tuned", "learner", target, sep = "_"))
+    # Add the best model to the list
+    learners_best[[method]] <- best_model
+  }
+}
+
+# Print the start time
+start_time <- Sys.time()
+cat(" Start time: ", format(start_time, "%Y-%m-%d %H:%M:%S"), "\n")
+
+# Benchmark the learners
+bmr <-
+  benchmark(design = benchmark_grid(task, learners_best, outer_resampling))
+
+# Print the end time
+end_time <- Sys.time()
+cat(" End time: ", format(end_time, "%Y-%m-%d %H:%M:%S"), "\n")
+
+# Calculate and print the time difference
+time_diff <- difftime(end_time, start_time, units = "secs")
+if (time_diff < 60) {
+  cat(" Time taken for benchmarking:", time_diff, " seconds\n")
+} else {
+  time_diff <- difftime(end_time, start_time, units = "mins")
+  cat(" Time taken for benchmarking: ", time_diff, " minutes\n")
+}
+
+# Boxplots of trained models and accuracy
+bench_boxplot <- autoplot(bmr, measure = msr(measure)) +
+  labs(x = "Method", y = paste(measure, "measure")) +
+  theme_bw() +
+  scale_x_discrete(labels = as.character(unlist(methods))) +
+   labs(title = paste0(toupper(substr(target, 1, 1)), substr(target, 2, nchar(target)), " benchmark"),
+       y = "Balanced accuracy") +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18, hjust = 0.5),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  )
+
+# Convert the benchmark results to a data frame
+bench_df <- as.data.frame(bmr$aggregate(measures = lapply(measures, msr)))
+
+# Add a new column for the method name
+bench_df %<>%
+  mutate(
+    method = case_when(
+      str_detect(learner_id, "lda") ~ "Linear Discriminant Analysis",
+      str_detect(learner_id, "ranger") ~ "Random Forest",
+      str_detect(learner_id, "xgboost") ~ "XGBoost",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  relocate(tail(names(.), 1), .before = names(.)[1]) %>%
+  select(-nr, -resample_result, -task_id, -resampling_id, -iters) %>%
+  rename_with(~ case_when(
+    .x == "classif.acc" ~ "accuracy",
+    .x == "classif.bacc" ~ "balanced accuracy",
+    .x == "classif.precision" ~ "precision",
+    .x == "classif.recall" ~ "recall",
+    .x == "classif.specificity" ~ "specificity",
+    .x == "classif.fbeta" ~ "f1",
+    .x == "classif.auc" ~ "auc",
+    .x == "classif.prauc" ~ "pr auc",
+    .x == "classif.logloss" ~ "logloss",
+    TRUE ~ .x  # keep the original name if no condition is met
+  ))
+
+# Print the method name and accuracy
+bench_df %>%
+  select(-learner_id) %>%
+  print()
+
+best_method <- bench_df %>%
+  dplyr::arrange(desc(`balanced accuracy`)) %>%
+  dplyr::select(learner_id) %>%
+  slice_head(n = 1) %>%
+  as.character()
+
+# Prediction outcome table
+method <-
+  str_split(best_method, pattern = "\\.", simplify = TRUE)[[2]]
+method_name <-
+  methods[[str_split(best_method, pattern = "\\.", simplify = TRUE)[2]]]
+cat("\n",
+    paste("Model selected for", target, "prediction based on:", method_name, sep = " "),
+    "\n")
+learner <- learners[[method]]
+if (method == "lda") {
+  # Train the learner
+  learner$train(task)
+  # Make a prediction using the learner without tuning
+  pred <- learner$predict(task)
+} else {
+  # Get the best model
+  best_model <- get(paste(method, "tuned", "learner", target, sep = "_"))
+  # Make a prediction using the best model
+  pred <- best_model$predict(task)
+}
+# Print the prediction accuracy
+cat(paste(
+  "\n",
+  measure,
+  "of",
+  method_name,
+  ":",
+  round(pred$score(msr(measure)), 2),
+  "\n",
+  sep = " "
+))
+
+# Get the truth, response and probabilities
+truth <- pred$truth
+response <- pred$response
+prob <- pred$prob
+# Create a data frame
+pred_df <- data.frame(truth = truth, response = response, prob)
+# Add a column to check if the prediction matches the truth
+pred_df$match <-
+  ifelse(pred_df$truth == pred_df$response, "TRUE", "FALSE")
+# Save predictions on train data
+assign(paste(method, "train", "predict", target, sep = "_"), pred_df)
+# Print number of correctly and incorrectly classified observations
+print(pred_df %>%
+        count(match) %>%
+        mutate(ratio = round(n / sum(n), digits = 2)))
+# Print number of correctly and incorrectly classified observations for each label of the target
+print(
+  pred_df %>%
+    group_by(truth) %>%
+    summarize(total = n(), correct = sum(match == TRUE)) %>%
+    mutate(accuracy = correct / total)
+)
+
+# Create the dodged barplot for accuracy, balanced accuracy, and logloss with custom colors
+bench_long <- bench_df %>%
+  select(method, accuracy, `balanced accuracy`, logloss) %>%
+  pivot_longer(cols = c(accuracy, `balanced accuracy`, logloss), names_to = "measure", values_to = "value")
+
+# Define the color palette
+metric_colors <- c("accuracy" = "skyblue3", "balanced accuracy" = "dodgerblue3", "logloss" = "tomato3")
+
+bench_barplot <- ggplot(bench_long, aes(x = method, y = value, fill = measure)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_manual(values = metric_colors) +
+  geom_text(aes(label = round(value, 2)), 
+            position = position_dodge(width = 0.9), 
+            vjust = 1.5, 
+            color = "white", 
+            size = 3) +
+  theme_minimal() +
+  labs(title = "Model performance measures",
+       x = "Method",
+       y = "Value") +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  )
+
+# Create the barplot for pred_df values
+bench_pred_df <- pred_df %>%
+  group_by(truth) %>%
+  summarize(total = n(), correct = sum(match == TRUE)) %>%
+  mutate(accuracy = correct / total)
+
+bench_pred_barplot <- ggplot(bench_pred_df, aes(x = reorder(truth, accuracy), y = accuracy)) +
+  geom_bar(stat = "identity", fill = "darkcyan") +
+  geom_text(aes(label = round(accuracy, 2)), hjust = -0.3, size = 4) +
+  geom_text(aes(label = paste(correct, "/", total)), y = 0.05, color = "white", size = 4, hjust = 0) +
+  theme_minimal() +
+  labs(title = paste("Accuracy by", target, sep = " "),
+       x = target,
+       y = "Accuracy") +
+  coord_flip() +
+  theme(
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  )
+
+# Combine the three plots using cowplot
+bench_comb_plot <- plot_grid(
+  bench_boxplot,
+  plot_grid(bench_barplot, bench_pred_barplot, ncol = 1, rel_heights = c(1, 1)),
+  ncol = 2,
+  rel_widths = c(1, 1)
+)
+
+# Print the combined plot
+print(bench_comb_plot)
+```
+
+#### Feature importance
+
+```{r importance, echo = FALSE, message = FALSE, warning = FALSE}
+# Define the function to parse taxon names
+parse_taxon_name <- function(name) {
+  parsed_name <- str_extract(name, "(?<=_s__).*")
+  parsed_name <- str_replace_all(parsed_name, "_t__", "_")
+  return(parsed_name)
+}
+
+if (target %in% c("category", "type")) {
+  # Create a mapping between original and simplified names
+  temp_tab <- tab_train %>% select(-target) %>% as.data.frame()
+  original_names <- colnames(temp_tab)
+  simplified_names <- sapply(original_names, parse_taxon_name)
+  
+  name_mapping <- setNames(simplified_names, original_names)
+  
+  # Train the model and calculate feature importance
+  if (method == "lda") {
+    # Train the learner
+    learner$train(task)
+    # Build R6 object on selected training model
+    temp_pred = Predictor$new(model = learner, data = temp_tab, y = tab_train$target, type = "prob")
+  } else {
+    # Get the best model
+    best_model <- get(paste(method, "tuned", "learner", target, sep = "_"))
+    # Build R6 object on selected training model
+    temp_pred = Predictor$new(model = best_model, data = temp_tab, y = tab_train$target, type = "prob")
+  }
+  
+  # Calculate feature importance
+  future::plan(future::multisession, workers = num_threads / 2)
+  feat_imp = FeatureImp$new(temp_pred, loss = "ce", n.repetitions = 100, compare = "difference")
+  
+  # Get feature importance results
+  feat_imp_results <- feat_imp$results
+  
+  # Modify the feature importance results to use simplified names
+  feat_imp_results$feature <- name_mapping[feat_imp_results$feature]
+  
+  # Remove any NA values resulting from unmatched names
+  feat_imp_results <- feat_imp_results[!is.na(feat_imp_results$feature), ]
+  
+  # Create the ggplot2 plot
+  feat_imp_plot <- ggplot(feat_imp_results, aes(x = reorder(feature, importance), y = importance)) +
+    geom_bar(stat = "identity", fill = "mediumseagreen") +
+    geom_errorbar(aes(ymin = importance.05, ymax = importance.95), width = 0.4) +
+    coord_flip() +
+    labs(title = "Feature importance", x = "Feature", y = "Importance (cross entropy loss)") +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 10),
+      plot.title = element_text(size = 14, face = "bold"),
+      axis.title = element_text(size = 12)
+    )
+  
+  # Print the modified plot
+  print(feat_imp_plot)
+}
+```
+
+#### Prediction
+
+```{r prediction, echo = FALSE, message = FALSE, warning = FALSE}
+# Create a classification task for the test set
+task_test <-
+  TaskClassif$new(id = "cFMD",
+                  backend = tab_test,
+                  target = "target")
+
+# Provide a positive class to task
+if (dataset_attr == "binary") {
+  task_test$positive <- positive_class
+}
+
+# Initialize 'predictions' as an empty list
+predictions <- list()
+
+# Loop through all methods
+for (i in 1:length(methods)) {
+  method = names(methods[i])
+  learner <- learners[[method]]
+  if (method == "lda") {
+    # Train the learner
+    learner$train(task)
+    # Make a prediction using the learner without tuning
+    pred <- learner$predict(task_test)
+  } else {
+    # Get the best model
+    best_model <- get(paste(method, "tuned", "learner", target, sep = "_"))
+    # Make a prediction using the best model
+    pred <- best_model$predict(task_test)
+  }
+  # Store the prediction
+  predictions[[method]] <- pred
+  # Print the prediction accuracy
+  cat(paste(
+    "\n",
+    measure,
+    "of",
+    methods[[i]],
+    ":",
+    round(pred$score(msr(measure)), 2),
+    "\n",
+    sep = " "
+  ))
+  
+  # Get the truth and response
+  truth <- pred$truth
+  response <- pred$response
+  prob <- pred$prob
+  # Create a data frame
+  pred_df <- data.frame(truth = truth, response = response, prob)
+  # Add a column to check if the prediction matches the truth
+  pred_df$match <-
+    ifelse(pred_df$truth == pred_df$response, "TRUE", "FALSE")
+  # Save predictions on test data
+  assign(paste(method, "test", "predict", target, sep = "_"), pred_df)
+  # Print number of correctly and incorrectly classified observations
+  print(pred_df %>%
+          count(match) %>%
+          mutate(ratio = round(n / sum(n), digits = 2)))
+  # Print number of correctly and incorrectly classified observations for each label of the target
+  print(
+    pred_df %>%
+      group_by(truth) %>%
+      summarize(total = n(), correct = sum(match == TRUE)) %>%
+      mutate(accuracy = correct / total)
+  )
+}
+
+# Visualize predictions
+
+# Gather prediction results for each method
+predictions_list <- list()
+
+for (i in 1:length(methods)) {
+  method = names(methods[i])
+  pred_df <- get(paste(method, "test", "predict", target, sep = "_"))
+  pred_df$method <- method
+  predictions_list[[method]] <- pred_df
+}
+
+# Combine all predictions into one data frame
+all_predictions <- do.call(rbind, predictions_list)
+
+# Create a summary table for plotting
+summary_df <- all_predictions %>%
+  group_by(method, truth, match) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+# Reshape the data for stacked bar plot of absolute counts
+plot_df <- summary_df %>%
+  pivot_wider(
+    names_from = match,
+    values_from = count,
+    values_fill = list(count = 0)
+  ) %>%
+  rename(True = `TRUE`, False = `FALSE`) %>%
+  # Calculate total counts and remove underscores from the target names
+  mutate(total = True + False, truth = str_replace_all(truth, "_", " ")) %>%
+  # Reorder categories based on abundance
+  arrange(desc(total))
+
+# Plot stacked barplot of absolute counts
+pred_plot <- ggplot(plot_df, aes(x = reorder(truth, -total), y = True + False)) +
+  geom_bar(stat = "identity",
+           aes(y = False, fill = "False"),
+           position = "stack") +
+  geom_bar(stat = "identity",
+           aes(y = True, fill = "True"),
+           position = "stack") +
+  facet_grid(method ~ ., scales = "free_y") +
+  scale_fill_manual(values = c("True" = "dodgerblue4", "False" = "firebrick")) +
+  labs(x = paste("Target", target, sep = " "), y = "Count", fill = "Prediction") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(pred_plot)
+
+# Reshape the data for stacked bar plot of relative counts
+pred_rel_plot_df <- summary_df %>%
+  pivot_wider(
+    names_from = match,
+    values_from = count,
+    values_fill = list(count = 0)
+  ) %>%
+  rename(True = `TRUE`, False = `FALSE`) %>%
+  # Calculate total counts and proportional counts of TRUE/FALSE values, and remove underscores from the target names
+  mutate(
+    total = True + False,
+    True_prop = True / total,
+    False_prop = False / total,
+    truth = str_replace_all(truth, "_", " ")
+  ) %>%
+  # Reorder categories based on absolute abundance
+  arrange(desc(total)) %>%
+  # Melt df
+  pivot_longer(
+    cols = c(True_prop, False_prop),
+    names_to = "prediction",
+    values_to = "proportion"
+  )
+
+# Plot stacked barplot with relative counts
+pred_rel_plot <- ggplot(pred_rel_plot_df,
+                            aes(
+                              x = reorder(truth, -total),
+                              y = proportion,
+                              fill = prediction
+                            )) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(
+    aes(label = scales::percent(proportion, accuracy = 0.1)),
+    position = position_stack(vjust = 0.5),
+    size = 3,
+    color = "white"
+  ) +
+  facet_grid(method ~ ., scales = "free_y") +
+  scale_fill_manual(
+    values = c(
+      "True_prop" = "dodgerblue4",
+      "False_prop" = "firebrick"
+    ),
+    labels = c("True_prop" = "True", "False_prop" = "False")
+  ) +
+  labs(x = paste("Target", target, sep = " "), y = "Proportion", fill = "Prediction") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(pred_rel_plot)
+
+# Remove the legend from the left plot
+pred_plot_no_legend <- pred_plot + theme(legend.position = "none")
+
+# Combine the plots, keeping the legend only for the right plot
+pred_comb_plot <- plot_grid(pred_plot_no_legend, pred_rel_plot, ncol = 2, rel_widths = c(1, 1.2))
+
+# Display the combined plot
+pred_comb_plot
+```
+
+#### Stacked model
+
+```{r super model, echo = FALSE, message = FALSE, warning = FALSE}
+if (target == "category") {
+  # Set planned operations in parallel
+  future::plan(multisession, workers = num_threads)
+  
+  # Initialize an empty list of learners
+  base_learners <- list()
+  
+  # Loop through all methods
+  for (i in 1:length(methods)) {
+    method <- names(methods[i])
+    if (method == "lda") {
+      # Create a po_method_cv object from a learner
+      base_learner <- learners[[method]]
+      po_learner <- po(
+        "learner_cv",
+        learner = base_learner,
+        resampling.folds = 10,
+        id = paste(method, "cv", sep = "_")
+      )
+    } else {
+      # Create a po_method_cv object from a tuner learner
+      base_learner <- get(paste(method, "tuned", "learner", target, sep = "_"))
+      po_learner <- po(
+        "learner_cv",
+        learner = base_learner,
+        resampling.folds = 10,
+        id = paste(method, "cv", sep = "_")
+      )
+    }
+    base_learners[[paste("po", method, "cv", sep = "_")]] <- po_learner
+  }
+  
+  # Combine base learners
+  combine_learners = gunion(base_learners)
+  
+  # Train the models and merge predictions
+  unite_learner = combine_learners %>>% po("featureunion")
+  unite_learner$train(task)
+  
+  # Define the meta-learners
+  superlearners <- as.data.table(mlr_learners) %>%
+    mutate(properties = map_chr(properties, paste, collapse = ",")) %>%
+    dplyr::select(key, label, task_type, properties) %>%
+    filter(
+      task_type == 'classif',
+      str_detect(properties, "multiclass"),
+      key %in% c(
+        "classif.AdaBoostM1",
+        "classif.C50",
+        "classif.IBk",
+        "classif.J48",
+        "classif.JRip",
+        "classif.LMT",
+        "classif.OneR",
+        "classif.PART",
+        "classif.catboost",
+        "classif.cforest",
+        "classif.ctree",
+        "classif.cv_glmnet",
+        "classif.decision_stump",
+        "classif.featureless",
+        "classif.glmnet",
+        "classif.kknn",
+        "classif.kstar",
+        "classif.lda",
+        "classif.liblinear",
+        "classif.lightgbm",
+        "classif.logistic",
+        "classif.multilayer_perceptron",
+        "classif.naive_bayes_multinomial",
+        "classif.naive_bayes_weka",
+        "classif.nnet",
+        "classif.randomForest",
+        "classif.random_forest_weka",
+        "classif.random_tree",
+        "classif.ranger",
+        "classif.reptree",
+        "classif.rfsrc",
+        "classif.rpart",
+        "classif.simple_logistic",
+        "classif.smo",
+        "classif.svm",
+        "classif.xgboost"
+      )
+    ) %>%
+    pull(key)
+  
+  # Initialize an empty data frame for prediction results
+  pred_results <- data.frame()
+  
+  # Set planned operations sequentially or in parallel
+  future::plan(multisession, workers = num_threads)
+  
+  # Evaluate the performance of each super learner
+  for (superlearner in superlearners) {
+    cat("\n", paste("Performance of", superlearner, sep = " "), "\n")
+    
+    # Use tryCatch to handle potential errors
+    tryCatch({
+      # Set the super model
+      united_learner <- unite_learner %>>% po("learner", lrn(superlearner, predict_type = "prob"))
+      # Train the stacked model
+      super_learner = as_learner(united_learner)
+      super_learner$train(task)
+      # Make prediction
+      super_pred <- super_learner$predict(task_test)
+      # Get the truth and response
+      truth <- super_pred$truth
+      response <- super_pred$response
+      # Create a data frame
+      super_pred_df <- data.frame(truth = truth, response = response)
+      # Add a column to check if the prediction matches the truth
+      super_pred_df$match <- ifelse(super_pred_df$truth == super_pred_df$response, "TRUE", "FALSE")
+      # Print number of correctly and incorrectly classified observations
+      print(super_pred_df %>% count(match) %>% mutate(ratio = round(n / sum(n), digits = 2)))
+      # Append the results to pred_results data frame
+      pred_results <- rbind(pred_results, data.frame(superlearner = superlearner, match = super_pred_df$match))
+      # Save ensemble model
+      assign(paste(superlearner, "ensemble", "tuned", "learner", target, sep = "_"), super_learner)
+    }, error = function(e) {
+      cat("Error in", superlearner, ": ", e$message, "\n")
+    })
+  }
+  
+  # Make df for stacked barplots with TRUE/FALSE predictions of each superlearner 
+  pred_res_df <- pred_results
+  
+  # Remove the "classif." prefix from superlearner names
+  pred_res_df$superlearner <- gsub("classif\\.", "", pred_res_df$superlearner)
+  
+  # Count the occurrences of TRUE and FALSE for each superlearner
+  pred_summary <- pred_res_df %>%
+    group_by(superlearner, match) %>%
+    summarise(count = n(), .groups = 'drop')
+  
+  # Calculate the total TRUE values for sorting
+  pred_summary_totals <- pred_summary %>%
+    filter(match == "TRUE") %>%
+    arrange(desc(count))
+  
+  # Reorder superlearner factor levels based on total TRUE values
+  pred_summary$superlearner <- factor(pred_summary$superlearner, levels = pred_summary_totals$superlearner)
+  
+  # Create the stacked bar plot
+  pred_super_plot <- ggplot(pred_summary, aes(x = superlearner, y = count, fill = match)) +
+    geom_bar(stat = "identity", position = "stack") +
+    scale_fill_manual(values = c("TRUE" = "dodgerblue4", "FALSE" = "firebrick")) +
+    geom_text(aes(label = count), position = position_stack(vjust = 0.5), color = "white", size = 3.5) +
+    labs(title = "Predictions of each super learner", x = "Super learner", y = "Count of predictions", fill = "Prediction match") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+      plot.title = element_text(size = 14, hjust = 0.5)
+    )
+  
+  # Print plot
+  print(pred_super_plot)
+  
+  # Tag each super learner with the method it is based on
+  for (i in ls(pattern = "_ensemble_tuned_learner_category")) {
+    super_model <- get(i)
+    id <- gsub("^classif\\.|_ensemble_tuned_learner_category$", "", i)
+    super_model$id = id
+    assign(paste0(id, "_ensemble_tuned_learner_category"), super_model)
+  }
+  
+  # Remove duplicated super learners
+  rm(list = ls(pattern = "classif."))
+  
+  # Get all ensemble learners
+  ensemble_learners <- ls(pattern = "_ensemble_tuned_learner_category")
+  ensemble_list <- lapply(ensemble_learners, function(learner_name) {
+    get(learner_name)
+  })
+  
+  # Benchmark all ensemble learners
+  ensemble_design = benchmark_grid(task, ensemble_list, outer_resampling)
+  
+  ensemble_bmr = benchmark(ensemble_design)
+  
+  # Boxplots of the accuracy of all ensemble models
+  ensemble_bench_boxplot <- autoplot(ensemble_bmr, measure = msr(measure)) +
+    labs(x = "Method", y = paste(measure, "measure")) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5)) +
+    labs(title = "Category ensemble benchmark", y = "Balanced accuracy")
+  
+  print(ensemble_bench_boxplot)
+  
+  # Convert the ensemble benchmark results to a data frame
+  ensemble_bench_df <- as.data.frame(ensemble_bmr$aggregate(measures = lapply(measures, msr)))
+  
+  # Make the df more suitable for displaying
+  ensemble_bench_df %>%
+    select(-nr, -resample_result, -task_id, -resampling_id, -iters) %>%
+    rename_with(~ case_when(
+      .x == "learner_id" ~ "super learner",
+      .x == "classif.acc" ~ "accuracy",
+      .x == "classif.bacc" ~ "balanced accuracy",
+      .x == "classif.precision" ~ "precision",
+      .x == "classif.recall" ~ "recall",
+      .x == "classif.specificity" ~ "specificity",
+      .x == "classif.fbeta" ~ "f1",
+      .x == "classif.auc" ~ "auc",
+      .x == "classif.prauc" ~ "pr auc",
+      .x == "classif.logloss" ~ "logloss",
+      TRUE ~ .x  # keep the original name if no condition is met
+    ))
+  
+  # Make the df more suitable for plotting
+  ensemble_bench_barplot_df <- ensemble_bench_df %>%
+    select(-nr, -resample_result, -task_id, -resampling_id, -iters) %>%
+    rename_with(~ case_when(
+      .x == "learner_id" ~ "super learner",
+      .x == "classif.acc" ~ "accuracy",
+      .x == "classif.bacc" ~ "balanced accuracy",
+      .x == "classif.precision" ~ "precision",
+      .x == "classif.recall" ~ "recall",
+      .x == "classif.specificity" ~ "specificity",
+      .x == "classif.fbeta" ~ "f1",
+      .x == "classif.auc" ~ "auc",
+      .x == "classif.prauc" ~ "pr auc",
+      .x == "classif.logloss" ~ "logloss",
+      TRUE ~ .x  # keep the original name if no condition is met
+    )) %>%
+    pivot_longer(cols = c("accuracy", "balanced accuracy", "logloss"), names_to = "metric", values_to = "value")
+  
+  # Define a custom fill palette for the metrics
+  metric_colors <- c("accuracy" = "skyblue3", "balanced accuracy" = "dodgerblue3", "logloss" = "tomato3")
+  
+  # Plot dodge barplot
+  ensemble_bench_barplot <- ggplot(ensemble_bench_barplot_df, aes(x = reorder(`super learner`, -value), y = value, fill = metric)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    coord_flip() +
+    scale_fill_manual(values = metric_colors) +
+    labs(x = "Super learner", y = "Value", fill = "Metric", title = "Performance metrics of super learners") +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 10),
+      axis.text.x = element_text(size = 10, angle = 0, hjust = 1),
+      plot.title = element_text(size = 14, hjust = 0.5),
+      legend.title = element_text(size = 12),
+      legend.text = element_text(size = 10)
+    )
+  
+  print(ensemble_bench_barplot)
+  
+  # Select the best ensemble method
+  
+  # Rank models based on each metric
+  ranked_df <- ensemble_bench_df %>%
+    mutate(
+      rank_acc = rank(desc(classif.acc)),
+      rank_bacc = rank(desc(classif.bacc)),
+      rank_logloss = rank(classif.logloss)
+    )
+  
+  # Calculate a combined rank (simple sum of ranks)
+  ranked_df <- ranked_df %>%
+    mutate(combined_rank = rank_acc + rank_bacc + rank_logloss)
+  
+  # Select the best model based on the combined rank
+  best_model <- ranked_df %>%
+    arrange(combined_rank) %>%
+    slice_head(n = 1) %>%
+    pull(learner_id)
+  
+  print(best_model)
+  
+  best_ensemble_method <- ensemble_bench_df %>%
+    dplyr::arrange(desc(classif.bacc), classif.logloss) %>%
+    dplyr::select(learner_id) %>%
+    slice_head(n = 1) %>%
+    as.character()
+  
+  cat("\n", paste("The method with highest balanced accuracy and lowest logloss was:"), best_ensemble_method, sep = " ", "\n")
+  
+  # Get the best super learner
+  super_learner <- get(paste(best_ensemble_method, "ensemble", "tuned", "learner", target, sep = "_"))
+  
+  # Benchmark the base learners vs the best super learner
+  final_design = benchmark_grid(task, unlist(list(learners_best, super_learner)), outer_resampling)
+  
+  final_bmr = benchmark(final_design)
+  
+  # Convert the ensemble benchmark results to a data frame
+  final_bench_df <- as.data.frame(final_bmr$aggregate(measures = lapply(measures, msr)))
+  
+  # Update final_bench_df to include the reordered method factor
+  final_bench_df %<>%
+    mutate(
+      method = case_when(
+        str_detect(learner_id, "classif.naive_bayes") ~ "Naive Bayes",
+        str_detect(learner_id, "classif.glmnet") ~ "GLM elastic net",
+        str_detect(learner_id, "classif.kknn") ~ "K-Nearest Neighbor",
+        str_detect(learner_id, "classif.lda") ~ "Linear Discriminant Analysis",
+        str_detect(learner_id, "classif.ranger") ~ "Random Forest",
+        str_detect(learner_id, "classif.xgboost") ~ "XGBoost",
+        TRUE ~ paste("Ensemble", best_ensemble_method, sep = " ")
+      )
+    ) %>%
+    relocate(tail(names(.), 1), .before = names(.)[1]) %>%
+    select(-nr, -resample_result, -task_id, -resampling_id, -iters) %>%
+    rename_with(~ case_when(
+      .x == "classif.acc" ~ "accuracy",
+      .x == "classif.bacc" ~ "balanced accuracy",
+      .x == "classif.precision" ~ "precision",
+      .x == "classif.recall" ~ "recall",
+      .x == "classif.specificity" ~ "specificity",
+      .x == "classif.fbeta" ~ "f1",
+      .x == "classif.auc" ~ "auc",
+      .x == "classif.prauc" ~ "pr auc",
+      .x == "classif.logloss" ~ "logloss",
+      TRUE ~ .x  # keep the original name if no condition is met
+    ))
+  
+  # Reorder the method factor to place "Ensemble" at the end
+  final_bench_df$method <- factor(final_bench_df$method, levels = c(unique(final_bench_df$method[final_bench_df$method != paste("Ensemble", best_ensemble_method, sep = " ")]), paste("Ensemble", best_ensemble_method, sep = " ")))
+  
+  # Define the color palette
+  metric_colors <- c("accuracy" = "skyblue3", "balanced accuracy" = "dodgerblue3", "logloss" = "tomato3")
+  
+  # Generate the dodge barplot for accuracy, balanced accuracy, and logloss
+  final_bench_long <- final_bench_df %>%
+    select(method, accuracy, `balanced accuracy`, logloss) %>%
+    pivot_longer(cols = c(accuracy, `balanced accuracy`, logloss), names_to = "measure", values_to = "value")
+  
+  final_bench_barplot <- ggplot(final_bench_long, aes(x = method, y = value, fill = measure)) +
+    geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+    scale_fill_manual(values = metric_colors) +
+    geom_text(aes(label = round(value, 2)), position = position_dodge(width = 0.8), vjust = -0.5, size = 3) +
+    labs(title = "Performance metrics of models", x = "Method", y = "Value", fill = "Metric") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom")
+  
+  # Generate the final boxplot without x-axis labels
+  final_bench_boxplot <- autoplot(final_bmr, measure = msr(measure)) +
+    labs(x = NULL, y = paste(measure, "measure"), title = "Final benchmark: base learners vs ensemble learner", y = "Balanced accuracy") +
+    theme_bw() +
+    theme(axis.text.x = element_blank(),  # Remove x-axis text
+          axis.ticks.x = element_blank(),  # Remove x-axis ticks
+          plot.title = element_text(hjust = 0.5))
+  
+  # Combine the two plots using cowplot
+  combined_final_plot <- plot_grid(
+    final_bench_boxplot,
+    final_bench_barplot,
+    ncol = 1,
+    rel_heights = c(1, 1)
+  )
+  
+  # Print the combined plot
+  print(combined_final_plot)
+}
+```
