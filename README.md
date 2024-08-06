@@ -33,7 +33,7 @@ These methodologies show the potential of using microbial variables to develop p
 - [Introduction](#introduction)
 - [First Case Study](#first-case-study)
 - [Second Case Study](#second-case-study)
-- [Running the Code](#run-the-code)
+- [Running the Code](#running-the-code)
 - [Acknowledgements](#acknowledgements)
 - [Citations](#citations)
 
