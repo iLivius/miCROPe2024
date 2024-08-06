@@ -2,6 +2,8 @@
 # for Predictive Tools in Microbiome Studies
 A focus on amplicon sequence variants and metagenomic shotgun sequencing
 
+![R](https://img.shields.io/badge/R-276DC3?style=for-the-badge&logo=r&logoColor=white)
+![RStudio](https://img.shields.io/badge/RStudio-75AADB?style=for-the-badge&logo=rstudio&logoColor=white)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.13169841.svg)](https://doi.org/10.5281/zenodo.13169841)
 
 ## Authors and Contributors
