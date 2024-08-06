@@ -64,7 +64,7 @@ This case study focuses on predicting food categories, types, and subtypes from 
 <p align="center"><i>Figure 2: Benchmark of base learners based on a random 80% split chosen for training.</i></p>
 
 ## Running the Code
-The Rmd files for the first and second case studies are designed to be run within RStudio. These files include code chunks and instructions to facilitate the installation of all necessary packages and execution of all steps.
+The Rmd files for the first and second case studies are designed to be run within [RStudio](https://posit.co/). These files include code chunks and instructions to facilitate the installation of all necessary packages and execution of all steps.
 
 To clone the repository, use the following command:
 
