@@ -5,7 +5,7 @@ author:
 - "Livio Antonielli"
 - "Niccolò Carlino"
 - "Nicola Segata"
-date: "July 29, 2024"
+date: "September 14, 2024"
 eeditor_options: 
   chunk_output_type: console
 format: html
@@ -86,6 +86,7 @@ pacman::p_load(
   psych,
   randomForestSRC,
   randomPlantedForest,
+  SMOTEWB,
   tidyheatmaps,
   tidyverse,
   wordcloud,
@@ -122,7 +123,10 @@ seed = 20240718
 set.seed(seed)
 
 # Set number of CPUs
-num_threads = detectCores()
+num_threads = detectCores()/2
+
+# Increase the maximum size allowed for future.apply workers to 2 GB
+options(future.globals.maxSize = 2 * 1024^3)
 
 # Time for an algorithm to run before a terminator will kill the tuning instance, in minutes
 term_min = 15
@@ -402,20 +406,22 @@ corrplot(
   col = colorRampPalette(c("blue", "white", "red"))(200)
 )
 
-rm(list = ls(pattern = "temp_"))
+# Balance the dataset by oversampling minority classes
+smote_list <- SMOTE(x = subset(tab_pro, select = -target) , y = tab_pro$target, k = 5)
+tab_smote <- cbind(as.data.frame(smote_list$x_new), target = smote_list$y_new)
 ```
 
 #### Train models
 
 ```{r classification, echo=FALSE, message=FALSE, warning=FALSE}
 # Reproducible randomization
-tab_pro %<>% sample_frac(size = 1)
+tab_smote %<>% sample_frac(size = 1)
 
 # Random sampling on defined split
 tab_train <-
-  tab_pro %>% mutate(id = rownames(tab_pro)) %>% sample_frac(0.80)
+  tab_smote %>% mutate(id = rownames(tab_smote)) %>% sample_frac(0.80)
 tab_test  <-
-  tab_pro %>% mutate(id = rownames(tab_pro)) %>% anti_join(tab_train, tab_pro, by = 'id') %>% select(-id)
+  tab_smote %>% mutate(id = rownames(tab_smote)) %>% anti_join(tab_train, tab_smote, by = 'id') %>% select(-id)
 tab_train$id <- NULL
 
 # Create a classification task
