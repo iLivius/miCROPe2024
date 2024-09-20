@@ -61,8 +61,10 @@ for (pkg in github_packages) {
 if (!require("pacman"))
   install.packages("pacman")
 pacman::p_load(
+  C50,
   callr,
   catboost,
+  coin,
   corrplot,
   cowplot,
   farff,
@@ -70,6 +72,7 @@ pacman::p_load(
   future.apply,
   gridExtra,
   iml,
+  LiblineaR,
   lightgbm,
   magrittr,
   mikropml,
@@ -86,6 +89,7 @@ pacman::p_load(
   psych,
   randomForestSRC,
   randomPlantedForest,
+  sandwich,
   SMOTEWB,
   tidyheatmaps,
   tidyverse,
