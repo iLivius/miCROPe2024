@@ -405,24 +405,24 @@ corrplot(
   col.lim = c(-1, 1),
   col = colorRampPalette(c("blue", "white", "red"))(200)
 )
-
-# Balance the dataset by oversampling minority classes
-smote_list <- SMOTE(x = subset(tab_pro, select = -target) , y = tab_pro$target, k = 5)
-tab_smote <- cbind(as.data.frame(smote_list$x_new), target = smote_list$y_new)
 ```
 
 #### Train models
 
 ```{r classification, echo=FALSE, message=FALSE, warning=FALSE}
 # Reproducible randomization
-tab_smote %<>% sample_frac(size = 1)
+tab_pro %<>% sample_frac(size = 1)
 
 # Random sampling on defined split
 tab_train <-
-  tab_smote %>% mutate(id = rownames(tab_smote)) %>% sample_frac(0.80)
+  tab_pro %>% mutate(id = rownames(tab_pro)) %>% sample_frac(0.80)
 tab_test  <-
-  tab_smote %>% mutate(id = rownames(tab_smote)) %>% anti_join(tab_train, tab_smote, by = 'id') %>% select(-id)
+  tab_pro %>% mutate(id = rownames(tab_pro)) %>% anti_join(tab_train, tab_pro, by = 'id') %>% select(-id)
 tab_train$id <- NULL
+
+# Balance the dataset by oversampling minority classes
+smote_list <- SMOTE(x = subset(tab_train, select = -target) , y = tab_train$target, k = 5)
+tab_train <- cbind(as.data.frame(smote_list$x_new), target = smote_list$y_new)
 
 # Create a classification task
 task <- TaskClassif$new(id = "cFMD",
