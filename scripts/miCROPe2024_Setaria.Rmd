@@ -713,8 +713,7 @@ for (i in c("Seed_origin", "Cultivation_soil")) {
         degree = to_tune(1, 5)
       )
       learner$timeout = c(train = 10, predict = Inf)
-      learner$encapsulate = c(train = "callr", predict = "callr")
-      learner$fallback = lrn("classif.featureless", predict_type = "prob")
+      learner$encapsulate("callr", fallback = lrn("classif.featureless", predict_type = "prob"))
     } else if (method == "xgboost") {
       learner$param_set$set_values(
         nrounds = to_tune(p_int(10, 1000, tags = "budget")),
