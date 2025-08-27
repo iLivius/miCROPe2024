@@ -2,7 +2,7 @@
 # for Predictive Tools in Microbiome Studies
 *A focus on amplicon sequence variants and metagenomic shotgun sequencing*
 
-This work is based on my invited talk at [miCROPe 2024](https://www.micrope.org/), presented in the session ["Data sciences and microbiome-based precision approaches"](https://www.micrope.org/program).
+This work is based on my invited talk at [miCROPe 2024](https://www.micrope.org/).
 
 ![R](https://img.shields.io/badge/R-276DC3?style=for-the-badge&logo=r&logoColor=white)
 ![RStudio](https://img.shields.io/badge/RStudio-75AADB?style=for-the-badge&logo=rstudio&logoColor=white)
@@ -42,7 +42,7 @@ These methodologies show the potential of using microbial variables to develop p
 - [Citations](#citations)
 
 ## Rationale
-The code provided in this repository is designed to reproduce the data presented during my talk at the *Data sciences and microbiome-based precision approaches* session, at the [miCROPe 2024](https://www.micrope.org/) conference.
+The code provided in this repository is designed to reproduce the data presented during my talk at the [*Data sciences and microbiome-based precision approaches*](https://www.micrope.org/program) session, at the [miCROPe 2024](https://www.micrope.org/) conference.
 
 The repository contains two primary case studies, each represented by an Rmd file:
 
