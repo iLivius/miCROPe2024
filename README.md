@@ -58,28 +58,38 @@ The application of machine learning to human microbiome research has been establ
 <p align="center"><i>Figure 1: Tree map of all algorithms considered in the analyses, arranged in families.</i></p>
 
 ## First Case Study
-This case study investigates microbial community assembly in Setaria viridis, a model organism for C4 grass plants. The objective was to explore how microbial communities in different plant compartments are influenced by the seed origin and the target cultivation soil. Seeds and soils were collected from two distinct locations in Austria: B5, characterized by sandy soil, and L9, characterized by clay soil. The seeds were sown in both their native soils (native samples) and foreign soils (foreign samples). The V5-V7 hypervariable region of the 16S rRNA gene was amplified and sequenced from samples including endophytic bacteria from various plant parts (panicle, stem, and root), original seeds, bulk soil, and rhizosphere. Amplicon Sequence Variants (ASVs) were generated using [DADA2](https://www.bioconductor.org/packages/release/bioc/html/dada2.html). Multiple rarefactions were applied to account for varying read numbers across samples. Data were then divided into native and foreign sample groups. Feature selection was used to remove ASVs with zero or nearly zero variance and to group perfectly correlated or anti-correlated ASVs, which helps reduce noise and redundancy. Finally, two sets of models were developed: one set assumed the seeds as the source for classifying plant compartments, while the other set assumed the soil as the source for identifying the origin of the microbes in the plant compartments.
+This case study investigates microbial community assembly in Setaria viridis, a model organism for C4 grass plants. The objective was to explore how microbial communities in different plant compartments are influenced by the seed origin and the target cultivation soil. Seeds and soils were collected from two distinct locations in Austria: B5, characterized by sandy soil, and L9, characterized by clay soil. The seeds were sown in both their native soils (native samples) and non-native soils (foreign samples). The V5-V7 hypervariable region of the 16S rRNA gene was amplified and sequenced from samples including endophytic bacteria from various plant parts (panicle, stem, and root), original seeds, bulk soil, and rhizosphere. Amplicon Sequence Variants (ASVs) were generated using [DADA2](https://www.bioconductor.org/packages/release/bioc/html/dada2.html). Multiple rarefactions were applied to account for varying read numbers across samples. Alpha and beta diversity illustrated differences in microbial richness, diversity, and community structure between Setaria seeds, soils, and plant compartments (*Figure 2*). Data were then divided into native and foreign sample groups. Feature selection was used to remove ASVs with zero or nearly zero variance and to group perfectly correlated or anti-correlated ASVs, which helps reduce noise and redundancy. 
+
+![Figure 2](data/Setaria_alpha_beta_diversity.png)
+
+<p align="left"><i>Figure 2: Richness (A) and diversity indices (B) show higher microbial diversity in B5 compared to L9 across seeds, soils, and plant compartments (left panel). Beta diversity shows B5 and L9 samples host distinct microbial communities (right panel). Microbial dissimilarities decrease when B5 seeds grow in L9 soil but increase when L9 seeds grow in B5 soil.</i></p>
+
+Finally, two sets of models were developed: one set assumed the seeds as the source for classifying plant compartments, while the other set assumed the soil as the source for identifying the origin of the microbes in the plant compartments. Model predictions on non-native soil samples are highlighted on *Figure 3*.
+
+![Figure 3](data/Setaria_predictions.png)
+
+<p align="left"><i>Figure 3: Algorithm accuracy on foreign samples for seed and soil models. Seed model: predictions are more accurate when B5-derived seeds are planted in L9 soil (A) compared to the reverse scenario, L9-derived seeds in B5 soil (B). Soil model: similarly, when L9 soil hosts B5-derived seeds (C), predictions are more accurate than when B5 soil hosts L9-derived seeds (D).</i></p>
 
 ## Second Case Study
 This case study focuses on predicting food categories, types, and subtypes from taxonomic profiles available from the [cFMD v1.1.0](https://github.com/SegataLab/cFMD) (curated Food Metagenomic Data) database. The [cFMD](https://github.com/SegataLab/cFMD) was developed as part of the [MASTER](https://www.master-h2020.eu/) EU Horizon 2020 project, which concluded in 2023. The purpose of the [cFMD](https://github.com/SegataLab/cFMD) repository is to provide a centralized source of high-quality, curated microbiome data and metadata related to food. It includes approximately 2,500 food metagenomic samples, with over 500 samples sourced from publicly available data in NCBI and the remainder generated within the MASTER project. The data were utilized to generate metagenome-assembled genomes (MAGs) and to perform taxonomic profiling at both species and strain levels using [MetaPhlAn 4](https://github.com/biobakery/MetaPhlAn) and [StrainPhlAn 4](https://github.com/biobakery/biobakery/wiki/strainphlan4).
 
-As an example, *Figure 2* displays the performance of various machine learning methods, i.e. LDA, Random Forest (Ranger), and XGBoost, in predicting food categories from the [cFMD v1.1.0](https://github.com/SegataLab/cFMD) database. The left panel shows the balanced accuracy of each method using 10-fold stratified outer resampling. The right panel provides the performance of the base learners across several metrics and a detailed breakdown for Random Forest across different food categories.
+As an example, *Figure 4* displays the performance of various machine learning methods, i.e. LDA, Random Forest (Ranger), and XGBoost, in predicting food categories from the [cFMD v1.1.0](https://github.com/SegataLab/cFMD) database. The left panel shows the balanced accuracy of each method using 10-fold stratified outer resampling. The right panel provides the performance of the base learners across several metrics and a detailed breakdown for Random Forest across different food categories.
 
-![Figure 2](data/cFMD_base_learners_benchmark.png)
+![Figure 4](data/cFMD_base_learners_benchmark.png)
 
-<p align="center"><i>Figure 2: Benchmark of base learners trained on the entire dataset after feature selection and minority-class oversampling.</i></p>
+<p align="center"><i>Figure 4: Benchmark of base learners trained on the entire dataset after feature selection and minority-class oversampling.</i></p>
 
-*Figure 3* provides an overview of the aggregated predictions across all resampling iterations from the outer cross-validation procedure. The model was trained on data where the minority food categories were synthetically oversampled, leading to significant improvement in predictive performance across all categories.
+*Figure 5* provides an overview of the aggregated predictions across all resampling iterations from the outer cross-validation procedure. The model was trained on data where the minority food categories were synthetically oversampled, leading to significant improvement in predictive performance across all categories.
 
-![Figure 3](data/cFMD_predictions.png)
+![Figure 5](data/cFMD_predictions.png)
 
-<p align="center"><i>Figure 3: Combined predictions from each outer resampling fold and classification accuracy based on the Random Forest (Ranger) model.</i></p>
+<p align="center"><i>Figure 5: Combined predictions from each outer resampling fold and classification accuracy based on the Random Forest (Ranger) model.</i></p>
 
-*Figure 4* presents the feature importance of the taxa used for training the Random Forest model. The importance is based on the contribution of each taxon to the predictive performance, highlighting key taxa that played a critical role in the classification of food categories.
+*Figure 6* presents the feature importance of the taxa used for training the Random Forest model. The importance is based on the contribution of each taxon to the predictive performance, highlighting key taxa that played a critical role in the classification of food categories.
 
-![Feature 4](data/cFMD_feature_importance.png)
+![Feature 6](data/cFMD_feature_importance.png)
 
-<p align="center"><i>Figure 4: Feature importance of taxa used for training the Random Forest model.</i></p>
+<p align="center"><i>Figure 6: Feature importance of taxa used for training the Random Forest model.</i></p>
 
 
 ## Running the Code
