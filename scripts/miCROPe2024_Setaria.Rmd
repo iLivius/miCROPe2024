@@ -1545,6 +1545,10 @@ for (i in c("Seed_origin", "Cultivation_soil")) {
   cat("\n", "Eigenvector centrality", "\n")
   print(sort(eigen_centrality(temp_graph)$vector, decreasing = TRUE))
 
+  # Define min_acc and max_acc based on the MeanDecreaseAccuracy from temp_imp_sel
+  min_acc <- min(temp_imp_sel$MeanDecreaseAccuracy, na.rm = TRUE)
+  max_acc <- max(temp_imp_sel$MeanDecreaseAccuracy, na.rm = TRUE)
+
   # Generate network graphs
   temp_graph_plot <- ggraph(temp_graph, layout = "fr") +
   geom_edge_arc(colour = "gray80",
