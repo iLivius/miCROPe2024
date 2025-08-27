@@ -1,6 +1,8 @@
 # Harnessing Machine Learning  
 # for Predictive Tools in Microbiome Studies
-A focus on amplicon sequence variants and metagenomic shotgun sequencing
+*A focus on amplicon sequence variants and metagenomic shotgun sequencing*
+
+This work is based on my invited talk at [miCROPe 2024](https://www.micrope.org/), presented in the session ["Data sciences and microbiome-based precision approaches"](https://www.micrope.org/program).
 
 ![R](https://img.shields.io/badge/R-276DC3?style=for-the-badge&logo=r&logoColor=white)
 ![RStudio](https://img.shields.io/badge/RStudio-75AADB?style=for-the-badge&logo=rstudio&logoColor=white)
